@@ -124,16 +124,24 @@ class StreamingAgentWrapper:
 
     async def query_streaming(
         self,
-        user_input: str
+        user_input: str,
+        task_id: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         流式执行查询，yield中间步骤和最终结果
+
+        Args:
+            user_input: 用户输入的查询
+            task_id: 任务ID，用于CSV文件命名
 
         Yields:
             {"type": "thinking", "content": "思考步骤内容"}
             {"type": "answer", "content": "最终答案"}
         """
         try:
+            # 如果没有提供task_id，生成一个
+            if not task_id:
+                task_id = uuid.uuid4().hex[:8]
             # 发送开始思考信号
             yield {
                 "type": "thinking",
@@ -198,23 +206,46 @@ class StreamingAgentWrapper:
 
                 yield {
                     "type": "thinking",
-                    "content": f"🔍 执行任务 {i}/{len(instructions)}: {inst_str[:50]}...\n"
+                    "content": f"🔍 执行任务 {i}/{len(instructions)}: {inst_str[:80]}...\n"
                 }
                 await asyncio.sleep(0)
 
-                # 在线程池中执行查询
-                result = await loop.run_in_executor(
-                    None,
-                    self.agent.engineer_agent.execute_instruction,
-                    inst_str
-                )
+                # 在线程池中执行查询，传递task_id
+                def execute_with_task_id():
+                    return self.agent.engineer_agent.execute_instruction(
+                        inst_str,
+                        context=None,
+                        task_id=task_id
+                    )
+
+                result = await loop.run_in_executor(None, execute_with_task_id)
                 initial_results.append(result)
 
                 if result.get("status") == "success":
+                    # 提取关键信息进行反馈
+                    feedback_parts = [f"✅ 任务 {i} 完成"]
+
+                    # 尝试提取行数信息
+                    if "rows" in result:
+                        feedback_parts.append(f"数据行数: {result['rows']}")
+
+                    # 尝试提取CSV路径
+                    if "csv_path" in result:
+                        csv_name = result['csv_path'].split('/')[-1]
+                        feedback_parts.append(f"文件: {csv_name}")
+
                     yield {
                         "type": "thinking",
-                        "content": f"✅ 任务 {i} 完成\n"
+                        "content": f"{', '.join(feedback_parts)}\n"
                     }
+
+                    # 提取并显示SQL语句和CSV文件路径
+                    sql_info = self._extract_sql_and_csv(result)
+                    if sql_info:
+                        yield {
+                            "type": "thinking",
+                            "content": sql_info
+                        }
                 else:
                     yield {
                         "type": "thinking",
@@ -278,21 +309,50 @@ class StreamingAgentWrapper:
 
                             yield {
                                 "type": "thinking",
-                                "content": f"🔍 深入查询 {i}: {inst_str[:50]}...\n"
+                                "content": f"🔍 深入查询 {i}/{len(drilldown_instructions)}: {inst_str[:80]}...\n"
                             }
                             await asyncio.sleep(0)
 
-                            result = await loop.run_in_executor(
-                                None,
-                                self.agent.engineer_agent.execute_instruction,
-                                inst_str
-                            )
+                            # 在线程池中执行下钻查询，传递task_id
+                            def execute_drilldown_with_task_id():
+                                return self.agent.engineer_agent.execute_instruction(
+                                    inst_str,
+                                    context=None,
+                                    task_id=task_id
+                                )
+
+                            result = await loop.run_in_executor(None, execute_drilldown_with_task_id)
                             drilldown_results.append(result)
 
                             if result.get("status") == "success":
+                                # 提取关键信息进行反馈
+                                feedback_parts = [f"✅ 深入查询 {i} 完成"]
+
+                                # 尝试提取行数信息
+                                if "rows" in result:
+                                    feedback_parts.append(f"数据行数: {result['rows']}")
+
+                                # 尝试提取CSV路径
+                                if "csv_path" in result:
+                                    csv_name = result['csv_path'].split('/')[-1]
+                                    feedback_parts.append(f"文件: {csv_name}")
+
                                 yield {
                                     "type": "thinking",
-                                    "content": f"✅ 深入查询 {i} 完成\n"
+                                    "content": f"{', '.join(feedback_parts)}\n"
+                                }
+
+                                # 提取并显示SQL语句和CSV文件路径
+                                sql_info = self._extract_sql_and_csv(result)
+                                if sql_info:
+                                    yield {
+                                        "type": "thinking",
+                                        "content": sql_info
+                                    }
+                            else:
+                                yield {
+                                    "type": "thinking",
+                                    "content": f"❌ 深入查询 {i} 失败: {result.get('error', '未知错误')}\n"
                                 }
                             await asyncio.sleep(0)
                 else:
@@ -312,8 +372,22 @@ class StreamingAgentWrapper:
             all_results = initial_results + drilldown_results
             all_instructions = instructions + drilldown_instructions
 
+            # 统计成功的查询数量
+            total_success = sum(1 for r in all_results if r.get("status") == "success")
+            yield {
+                "type": "thinking",
+                "content": f"📊 汇总数据: 共 {len(all_results)} 个查询, {total_success} 个成功\n"
+            }
+            await asyncio.sleep(0)
+
             # 生成最终答案
             if len(all_results) == 1 and all_results[0].get("status") == "success" and not drilldown_results:
+                yield {
+                    "type": "thinking",
+                    "content": "✍️ 生成单一查询结果报告...\n"
+                }
+                await asyncio.sleep(0)
+
                 final_answer = await loop.run_in_executor(
                     None,
                     self.agent._format_single_result_to_markdown,
@@ -321,6 +395,12 @@ class StreamingAgentWrapper:
                     all_results[0]
                 )
             else:
+                yield {
+                    "type": "thinking",
+                    "content": f"✍️ 综合分析 {len(all_results)} 个查询结果...\n"
+                }
+                await asyncio.sleep(0)
+
                 def generate_final():
                     synthesis_report = self.agent.analyst_agent.synthesize_results(
                         instructions=all_instructions,
@@ -334,6 +414,12 @@ class StreamingAgentWrapper:
                     )
 
                 final_answer = await loop.run_in_executor(None, generate_final)
+
+            yield {
+                "type": "thinking",
+                "content": "✅ 报告生成完成\n"
+            }
+            await asyncio.sleep(0)
 
             # 发送最终答案
             yield {
@@ -363,6 +449,69 @@ class StreamingAgentWrapper:
                     break
 
         return '\n'.join(summary_lines) if summary_lines else "分析用户问题并生成查询计划"
+
+    def _extract_sql_and_csv(self, result: Dict[str, Any]) -> Optional[str]:
+        """
+        从查询结果中提取SQL语句和CSV文件路径
+
+        Args:
+            result: 查询结果字典
+
+        Returns:
+            格式化的SQL和CSV信息字符串，如果提取失败返回None
+        """
+        import re
+
+        try:
+            result_text = result.get("result", "")
+            if not result_text:
+                return None
+
+            # 确保result_text是字符串
+            if not isinstance(result_text, str):
+                result_text = str(result_text)
+
+            info_lines = []
+
+            # 提取SQL语句 - 从结果文本中查找SQL
+            sql_match = re.search(r'(?:执行SQL|SQL查询|生成的SQL)[:\s]*\n?```(?:sql)?\s*\n?(.*?)\n?```', result_text, re.DOTALL | re.IGNORECASE)
+            if not sql_match:
+                # 尝试其他模式
+                sql_match = re.search(r'SELECT\s+.*?FROM\s+.*?(?:WHERE|GROUP|ORDER|LIMIT|;|\n\n)', result_text, re.DOTALL | re.IGNORECASE)
+
+            if sql_match:
+                sql_text = sql_match.group(1) if sql_match.lastindex else sql_match.group(0)
+                sql_text = sql_text.strip()
+                # 清理SQL文本
+                sql_text = re.sub(r'\s+', ' ', sql_text)  # 压缩多余空格
+                if len(sql_text) > 200:
+                    sql_text = sql_text[:200] + "..."
+                info_lines.append(f"📝 SQL: {sql_text}")
+
+            # 提取CSV文件路径
+            csv_match = re.search(r'CSV\s*文件[:\s]*(?:\[([^\]]+)\]|\`([^\`]+)\`|([^\n]+))', result_text, re.IGNORECASE)
+            if csv_match:
+                csv_path = csv_match.group(1) or csv_match.group(2) or csv_match.group(3)
+                csv_path = csv_path.strip()
+                # 提取文件名
+                csv_filename = csv_path.split('/')[-1]
+
+                # 如果有base_url，生成下载链接
+                if hasattr(self.agent, 'base_url') and self.agent.base_url:
+                    download_url = f"{self.agent.base_url.rstrip('/')}/files/{csv_filename}"
+                    info_lines.append(f"💾 CSV文件: {csv_filename}")
+                    info_lines.append(f"📥 下载链接: {download_url}")
+                else:
+                    info_lines.append(f"💾 CSV文件: {csv_path}")
+
+            if info_lines:
+                return "\n".join(info_lines) + "\n"
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"提取SQL和CSV信息失败: {e}")
+            return None
 
 
 # ============ API端点 ============
@@ -453,6 +602,8 @@ async def create_chat_completion(request: ChatCompletionRequest):
         async def generate_stream():
             """生成SSE流"""
             wrapper = StreamingAgentWrapper(agent)
+            # 使用request_id作为task_id
+            task_id = request_id.replace("chatcmpl-", "")
 
             # 首先发送role
             chunk = ChatCompletionStreamResponse(
@@ -469,8 +620,8 @@ async def create_chat_completion(request: ChatCompletionRequest):
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
 
-            # 流式处理查询
-            async for step in wrapper.query_streaming(user_input):
+            # 流式处理查询，传递task_id
+            async for step in wrapper.query_streaming(user_input, task_id=task_id):
                 step_type = step.get("type")
                 content = step.get("content", "")
 
@@ -562,8 +713,9 @@ async def create_chat_completion(request: ChatCompletionRequest):
     # 非流式响应
     else:
         try:
-            # 同步调用Agent
-            result = agent.query(user_input)
+            # 同步调用Agent，传递task_id
+            task_id = request_id.replace("chatcmpl-", "")
+            result = agent.query(user_input, task_id=task_id)
 
             response = ChatCompletionResponse(
                 id=request_id,

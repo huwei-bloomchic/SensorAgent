@@ -261,7 +261,8 @@ result = sql_execution(sql=生成的SQL, filename="product_clicks.csv")
     def execute_instruction(
         self,
         instruction: str,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         执行来自上层Agent的指令
@@ -269,6 +270,7 @@ result = sql_execution(sql=生成的SQL, filename="product_clicks.csv")
         Args:
             instruction: 自然语言指令
             context: 上下文信息(可选)
+            task_id: 任务ID，用于CSV文件命名(可选)
 
         Returns:
             查询结果
@@ -281,12 +283,17 @@ result = sql_execution(sql=生成的SQL, filename="product_clicks.csv")
             # 构建完整的prompt
             system_prompt = self._get_system_prompt()
 
+            # 添加task_id信息
+            task_id_info = ""
+            if task_id:
+                task_id_info = f"\n\n【任务ID】\n{task_id}\n⚠️ 重要: 执行SQL时，请在filename参数中包含此任务ID，格式: task_{task_id}_文件名.csv\n"
+
             # 添加上下文信息
             context_info = ""
             if context:
                 context_info = f"\n\n【上下文信息】\n{context}\n"
 
-            full_prompt = f"{system_prompt}\n\n【指令】\n{instruction}{context_info}"
+            full_prompt = f"{system_prompt}{task_id_info}\n\n【指令】\n{instruction}{context_info}"
 
             # 调用Agent执行
             logger.info("[EngineerAgent] 开始执行指令...")

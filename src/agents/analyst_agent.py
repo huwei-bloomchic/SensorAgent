@@ -381,7 +381,7 @@ instruction_2 = {{
 **数据预览:**
 [将"查询结果摘要"中的"数据预览"转换为Markdown表格格式]
 
-**完整数据文件:** `[CSV文件路径]`
+**完整数据下载:** [点击下载CSV文件]([CSV下载链接])
 
 （如果有多个查询，重复此结构）
 
@@ -466,10 +466,15 @@ instruction_2 = {{
                 elif not isinstance(result_text, str):
                     result_text = str(result_text)
 
-                # 提取CSV路径
+                # 提取CSV路径和下载链接
                 csv_match = re.search(r'CSV 文件:\s*(.+)', result_text)
                 if csv_match:
                     summary["CSV文件"] = csv_match.group(1).strip()
+
+                # 提取下载链接
+                download_match = re.search(r'下载链接:\s*(.+)', result_text)
+                if download_match:
+                    summary["下载链接"] = download_match.group(1).strip()
 
                 # 提取行数
                 rows_match = re.search(r'行数:\s*(\d+)', result_text)
@@ -489,12 +494,35 @@ instruction_2 = {{
                     try:
                         structured_data = json.loads(structured_match.group(1))
 
-                        # 只保留关键统计信息
+                        # 保留所有关键模块信息
                         if "summary_stats" in structured_data:
                             summary["统计摘要"] = structured_data["summary_stats"]
 
+                        if "summary" in structured_data:
+                            summary["摘要信息"] = structured_data["summary"]
+
                         if "date_range" in structured_data:
                             summary["日期范围"] = structured_data["date_range"]
+
+                        if "analysis" in structured_data:
+                            summary["分析详情"] = structured_data["analysis"]
+
+                        if "key_findings" in structured_data:
+                            summary["关键发现"] = structured_data["key_findings"]
+
+                        # detailed_data通常数据量较大,只保留行数信息
+                        if "detailed_data" in structured_data:
+                            detailed = structured_data["detailed_data"]
+                            if isinstance(detailed, list):
+                                # 对于小数据集(<=30行),保留完整数据
+                                if len(detailed) <= 30:
+                                    summary["详细数据"] = detailed
+                                else:
+                                    # 对于大数据集,保留前20行
+                                    summary["详细数据"] = detailed[:20]
+                                    summary["详细数据_说明"] = f"仅显示前20行,共{len(detailed)}行"
+                            else:
+                                summary["详细数据"] = detailed
                     except:
                         pass
 

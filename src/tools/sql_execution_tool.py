@@ -163,6 +163,40 @@ result = sql_execution(
                 logger.debug(f"检测到单行数据格式，转换为二维数组: {rows}")
                 rows = [rows]  # 将 [161611.0] 转换为 [[161611.0]]
 
+        # 检测并修复列数不一致的问题
+        if rows and isinstance(rows, list) and len(rows) > 0:
+            # 统计每行的列数
+            row_lengths = [len(row) if isinstance(row, list) else 1 for row in rows]
+            max_cols = max(row_lengths)
+            min_cols = min(row_lengths)
+
+            if max_cols != min_cols:
+                logger.warning(f"检测到数据行列数不一致: 最小{min_cols}列, 最大{max_cols}列")
+                logger.warning(f"前5行数据: {rows[:5]}")
+
+                # 如果columns数量与最大列数不匹配，重新推断columns
+                if len(columns) != max_cols:
+                    logger.warning(f"列名数量({len(columns)})与实际数据列数({max_cols})不匹配，重新推断列名")
+                    # 从数据中推断实际的列数
+                    columns = [f"col_{i}" for i in range(max_cols)]
+
+                # 填充较短的行，使所有行长度一致
+                normalized_rows = []
+                for row in rows:
+                    if isinstance(row, list):
+                        if len(row) < max_cols:
+                            # 用None填充缺失的列
+                            normalized_row = row + [None] * (max_cols - len(row))
+                            normalized_rows.append(normalized_row)
+                        else:
+                            normalized_rows.append(row)
+                    else:
+                        # 单个值，转换为列表并填充
+                        normalized_rows.append([row] + [None] * (max_cols - 1))
+
+                rows = normalized_rows
+                logger.info(f"已标准化数据行，所有行现在都有{max_cols}列")
+
         if not columns:
             logger.warning("结果中没有列名信息")
             # 如果没有列名，尝试从第一行推断
@@ -178,7 +212,7 @@ result = sql_execution(
             return df
         except Exception as e:
             logger.error(f"创建DataFrame失败: {e}")
-            logger.error(f"数据结构: columns={columns}, rows={rows}")
+            logger.error(f"数据结构: columns={columns}, rows={rows[:5] if rows else []}")
             raise ValueError(f"数据格式错误，无法创建DataFrame: {str(e)}")
 
     def _save_csv(self, df: pd.DataFrame, output_path: str) -> str:

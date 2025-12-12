@@ -92,7 +92,7 @@ class SensorsAnalyticsAgentV2:
 
         return client
 
-    def query(self, user_input: str, enable_progressive_analysis: bool = True) -> str:
+    def query(self, user_input: str, enable_progressive_analysis: bool = True, task_id: Optional[str] = None) -> str:
         """
         处理用户查询 - 渐进式双层架构协作流程
 
@@ -106,10 +106,15 @@ class SensorsAnalyticsAgentV2:
         Args:
             user_input: 用户输入的自然语言查询
             enable_progressive_analysis: 是否启用渐进式分析 (默认True)
+            task_id: 任务ID，用于CSV文件命名 (可选)
 
         Returns:
             分析结果和洞察
         """
+        # 如果没有提供task_id，生成一个
+        import uuid
+        if not task_id:
+            task_id = uuid.uuid4().hex[:8]
         logger.info("=" * 80)
         logger.info(f"[Orchestrator V2] 开始处理查询: {user_input}")
         logger.info(f"[渐进式分析] {'启用' if enable_progressive_analysis else '禁用'}")
@@ -146,7 +151,7 @@ class SensorsAnalyticsAgentV2:
             logger.info("【阶段2】下层执行Agent - 执行初步查询")
             logger.info("=" * 80)
 
-            initial_results = self._execute_instructions(initial_instructions)
+            initial_results = self._execute_instructions(initial_instructions, task_id=task_id)
 
             # 检查初步查询是否成功
             success_count = sum(1 for r in initial_results if r.get("status") == "success")
@@ -195,8 +200,8 @@ class SensorsAnalyticsAgentV2:
                         for i, inst in enumerate(drilldown_instructions, 1):
                             logger.info(f"  {i}. {inst.get('task', inst)}")
 
-                        # 执行下钻查询
-                        drilldown_results = self._execute_instructions(drilldown_instructions)
+                        # 执行下钻查询，传递task_id
+                        drilldown_results = self._execute_instructions(drilldown_instructions, task_id=task_id)
 
                         drilldown_success = sum(1 for r in drilldown_results if r.get("status") == "success")
                         logger.info(f"\n下钻查询完成: {drilldown_success}/{len(drilldown_results)} 成功")
@@ -343,12 +348,13 @@ class SensorsAnalyticsAgentV2:
 
         return '\n'.join(summary_lines) if summary_lines else "自动分析"
 
-    def _execute_instructions(self, instructions: list) -> list:
+    def _execute_instructions(self, instructions: list, task_id: Optional[str] = None) -> list:
         """
         执行一组指令，支持查询去重和缓存
 
         Args:
             instructions: 指令列表
+            task_id: 任务ID，用于CSV文件命名 (可选)
 
         Returns:
             执行结果列表
@@ -376,9 +382,13 @@ class SensorsAnalyticsAgentV2:
                 result["from_cache"] = True  # 标记为缓存结果
                 deduplicated_count += 1
             else:
-                # 调用下层Agent执行
+                # 调用下层Agent执行，传递task_id
                 logger.info(f"🔍 执行新指令 (hash: {instruction_hash[:8]}...)")
-                result = self.engineer_agent.execute_instruction(instruction_str)
+                result = self.engineer_agent.execute_instruction(
+                    instruction_str,
+                    context=None,
+                    task_id=task_id
+                )
                 result["query_hash"] = instruction_hash  # 添加查询标识
                 result["instruction"] = instruction_str  # 记录原始指令
 

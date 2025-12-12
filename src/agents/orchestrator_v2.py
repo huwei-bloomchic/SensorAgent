@@ -7,6 +7,8 @@ from loguru import logger
 from datetime import datetime
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from config.settings import get_settings
 from src.sensors.client import SensorsClient
@@ -404,26 +406,33 @@ class SensorsAnalyticsAgentV2:
         self,
         instructions: list,
         task_id: Optional[str] = None,
-        task_context: Optional[TaskContext] = None
+        task_context: Optional[TaskContext] = None,
+        max_concurrent: int = 6
     ) -> list:
         """
         执行一组指令，支持查询去重和缓存，并记录到TaskContext
+        支持并发执行，最多同时执行 max_concurrent 个任务
 
         Args:
             instructions: 指令列表
             task_id: 任务ID，用于CSV文件命名 (可选)
             task_context: 任务上下文，用于记录中间数据 (可选)
+            max_concurrent: 最大并发任务数，默认6
 
         Returns:
-            执行结果列表
+            执行结果列表（保持与输入指令相同的顺序）
         """
-        execution_results = []
+        if not instructions:
+            return []
+
+        # 线程安全的缓存和计数器
         query_cache = {}  # 查询缓存: {指令hash: 结果}
-        deduplicated_count = 0
+        cache_lock = threading.Lock()
+        deduplicated_count = [0]  # 使用列表以便在闭包中修改
 
-        for i, instruction in enumerate(instructions, 1):
-            logger.info(f"\n--- 执行指令 {i}/{len(instructions)} ---")
-
+        # 预处理所有指令，准备执行参数
+        execution_tasks = []
+        for i, instruction in enumerate(instructions):
             # 将指令转换为字符串(如果是字典)
             if isinstance(instruction, dict):
                 instruction_str = instruction.get("task", json.dumps(instruction, ensure_ascii=False))
@@ -444,48 +453,102 @@ class SensorsAnalyticsAgentV2:
                     parameters=instruction_params
                 )
 
-            # 检查是否已经执行过相同的指令
-            if instruction_hash in query_cache:
-                logger.info(f"⚡ 检测到重复指令，使用缓存结果 (hash: {instruction_hash[:8]}...)")
-                result = query_cache[instruction_hash].copy()
-                result["from_cache"] = True  # 标记为缓存结果
-                if query_ctx:
-                    query_ctx.from_cache = True
-                deduplicated_count += 1
-            else:
-                # 调用下层Agent执行，传递task_id
-                logger.info(f"🔍 执行新指令 (hash: {instruction_hash[:8]}...)")
-                result = self.engineer_agent.execute_instruction(
-                    instruction_str,
-                    context=None,
-                    task_id=task_id
-                )
-                result["query_hash"] = instruction_hash  # 添加查询标识
-                result["instruction"] = instruction_str  # 记录原始指令
+            execution_tasks.append({
+                "index": i,
+                "instruction": instruction,
+                "instruction_str": instruction_str,
+                "instruction_params": instruction_params,
+                "instruction_hash": instruction_hash,
+                "query_ctx": query_ctx
+            })
 
-                # 将结果记录到TaskContext
-                if query_ctx:
-                    self._record_result_to_context(query_ctx, result)
+        # 定义单个指令的执行函数
+        def execute_single_instruction(task_info: dict) -> tuple:
+            """执行单个指令，返回 (索引, 结果)"""
+            i = task_info["index"]
+            instruction_str = task_info["instruction_str"]
+            instruction_hash = task_info["instruction_hash"]
+            query_ctx = task_info["query_ctx"]
 
-                # 缓存成功的查询结果
-                if result.get("status") == "success":
+            logger.info(f"\n--- 执行指令 {i+1}/{len(instructions)} ---")
+
+            # 检查缓存（需要加锁）
+            with cache_lock:
+                if instruction_hash in query_cache:
+                    logger.info(f"⚡ 检测到重复指令，使用缓存结果 (hash: {instruction_hash[:8]}...)")
+                    result = query_cache[instruction_hash].copy()
+                    result["from_cache"] = True
+                    if query_ctx:
+                        query_ctx.from_cache = True
+                    deduplicated_count[0] += 1
+                    return (i, result)
+
+            # 执行新指令（不在锁内执行，避免阻塞其他任务）
+            logger.info(f"🔍 执行新指令 (hash: {instruction_hash[:8]}...)")
+            result = self.engineer_agent.execute_instruction(
+                instruction_str,
+                context=None,
+                task_id=task_id
+            )
+            result["query_hash"] = instruction_hash
+            result["instruction"] = instruction_str
+
+            # 记录结果到TaskContext
+            if query_ctx:
+                self._record_result_to_context(query_ctx, result)
+
+            # 缓存成功的查询结果（需要加锁）
+            if result.get("status") == "success":
+                with cache_lock:
                     query_cache[instruction_hash] = result.copy()
 
-            execution_results.append(result)
+            return (i, result)
 
-            # 记录执行状态
-            status = result.get("status")
-            if status == "success":
-                cache_info = " (缓存)" if result.get("from_cache") else ""
-                logger.info(f"✅ 指令 {i} 执行成功{cache_info}")
-            elif status == "partial":
-                logger.warning(f"⚠️  指令 {i} 部分完成: {result.get('result', result.get('error'))}")
-            else:
-                logger.error(f"❌ 指令 {i} 执行失败: {result.get('error')}")
+        # 使用线程池并发执行
+        execution_results = [None] * len(instructions)  # 预分配结果列表，保持顺序
+
+        logger.info(f"🚀 开始并发执行 {len(instructions)} 个指令，最大并发数: {max_concurrent}")
+
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            # 提交所有任务
+            future_to_task = {
+                executor.submit(execute_single_instruction, task): task
+                for task in execution_tasks
+            }
+
+            # 收集结果
+            completed_count = 0
+            for future in as_completed(future_to_task):
+                try:
+                    index, result = future.result()
+                    execution_results[index] = result
+
+                    completed_count += 1
+                    status = result.get("status")
+                    cache_info = " (缓存)" if result.get("from_cache") else ""
+                    
+                    if status == "success":
+                        logger.info(f"✅ 指令 {index+1}/{len(instructions)} 执行成功{cache_info} [{completed_count}/{len(instructions)}]")
+                    elif status == "partial":
+                        logger.warning(f"⚠️  指令 {index+1}/{len(instructions)} 部分完成: {result.get('result', result.get('error'))} [{completed_count}/{len(instructions)}]")
+                    else:
+                        logger.error(f"❌ 指令 {index+1}/{len(instructions)} 执行失败: {result.get('error')} [{completed_count}/{len(instructions)}]")
+                except Exception as e:
+                    # 处理执行异常
+                    task = future_to_task[future]
+                    logger.exception(f"❌ 指令 {task['index']+1} 执行异常: {e}")
+                    execution_results[task["index"]] = {
+                        "status": "error",
+                        "instruction": task["instruction_str"],
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat()
+                    }
 
         # 记录去重统计
-        if deduplicated_count > 0:
-            logger.info(f"\n💾 查询去重: 避免了 {deduplicated_count} 次重复执行")
+        if deduplicated_count[0] > 0:
+            logger.info(f"\n💾 查询去重: 避免了 {deduplicated_count[0]} 次重复执行")
+
+        logger.info(f"✨ 所有指令执行完成: {len(execution_results)} 个结果")
 
         return execution_results
 

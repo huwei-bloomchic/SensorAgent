@@ -129,30 +129,48 @@ class StreamingAgentWrapper:
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         流式执行查询，yield中间步骤和最终结果
+        基于TaskContext生成完整的Markdown格式thinking输出
 
         Args:
             user_input: 用户输入的查询
             task_id: 任务ID，用于CSV文件命名
 
         Yields:
-            {"type": "thinking", "content": "思考步骤内容"}
+            {"type": "thinking", "content": "思考步骤内容（Markdown格式）"}
             {"type": "answer", "content": "最终答案"}
         """
+        from src.models.task_context import TaskContext
+        
         try:
             # 如果没有提供task_id，生成一个
             if not task_id:
                 task_id = uuid.uuid4().hex[:8]
-            # 发送开始思考信号
+            
+            # 创建TaskContext
+            task_context = TaskContext(
+                task_id=task_id,
+                user_question=user_input
+            )
+            
+            # 发送开始思考信号（基于TaskContext）
+            progress_md = self._format_context_progress_markdown(task_context)
             yield {
                 "type": "thinking",
-                "content": "🤔 开始分析您的问题...\n"
+                "content": progress_md
             }
             await asyncio.sleep(0)  # 让出控制权，确保立即发送
 
             # 阶段1: 初步分析
+            task_context.start_iteration(
+                iteration_type="initial",
+                name="初步分析",
+                description="理解用户问题并制定分析计划"
+            )
+            
+            progress_md = self._format_context_progress_markdown(task_context)
             yield {
                 "type": "thinking",
-                "content": "\n【阶段1】上层分析Agent - 理解问题并制定计划\n"
+                "content": progress_md
             }
             await asyncio.sleep(0)
 
@@ -166,94 +184,43 @@ class StreamingAgentWrapper:
             )
             analysis_plan = analysis_result.get("analysis_plan", "")
 
-            # 发送分析计划
-            plan_summary = self._extract_plan_summary(analysis_plan)
-            yield {
-                "type": "thinking",
-                "content": f"📋 分析计划:\n{plan_summary}\n"
-            }
-            await asyncio.sleep(0)
-
             # 解析指令
             instructions = self.agent._parse_instructions(analysis_plan)
 
-            if instructions:
-                yield {
-                    "type": "thinking",
-                    "content": f"\n📝 识别到 {len(instructions)} 个查询任务\n"
-                }
-            else:
-                yield {
-                    "type": "thinking",
-                    "content": "\n⚠️ 未能提取具体指令，将直接执行查询\n"
-                }
+            if not instructions:
                 instructions = [{
                     "task": user_input,
                     "time_range": "last_7_days"
                 }]
-            await asyncio.sleep(0)
 
-            # 阶段2: 执行初步查询
+            # 更新TaskContext并生成thinking输出
+            progress_md = self._format_context_progress_markdown(task_context)
             yield {
                 "type": "thinking",
-                "content": "\n【阶段2】下层SQL执行Agent - 执行数据查询\n"
+                "content": progress_md
             }
             await asyncio.sleep(0)
 
-            initial_results = []
-            for i, inst in enumerate(instructions, 1):
-                inst_str = inst.get("task", str(inst)) if isinstance(inst, dict) else str(inst)
-
-                yield {
-                    "type": "thinking",
-                    "content": f"🔍 执行任务 {i}/{len(instructions)}: {inst_str[:80]}...\n"
-                }
-                await asyncio.sleep(0)
-
-                # 流式执行查询，实时输出 thinking
-                result = None
-                async for event in self._execute_engineer_streaming(inst_str, task_id):
-                    if event["type"] == "thinking":
-                        # 转发 EngineerAgent 的 thinking
-                        yield event
-                        await asyncio.sleep(0)
-                    elif event["type"] == "result":
-                        result = event["data"]
-
-                if result:
-                    initial_results.append(result)
-
-                if result.get("status") == "success":
-                    # 提取关键信息进行反馈
-                    feedback_parts = [f"✅ 任务 {i} 完成"]
-
-                    # 尝试提取行数信息
-                    if "rows" in result:
-                        feedback_parts.append(f"数据行数: {result['rows']}")
-
-                    # 尝试提取CSV路径
-                    if "csv_path" in result:
-                        csv_name = result['csv_path'].split('/')[-1]
-                        feedback_parts.append(f"文件: {csv_name}")
-
-                    yield {
-                        "type": "thinking",
-                        "content": f"{', '.join(feedback_parts)}\n"
-                    }
-
-                    # 提取并显示SQL语句和CSV文件路径
-                    sql_info = self._extract_sql_and_csv(result)
-                    if sql_info:
-                        yield {
-                            "type": "thinking",
-                            "content": sql_info
-                        }
-                else:
-                    yield {
-                        "type": "thinking",
-                        "content": f"❌ 任务 {i} 失败: {result.get('error', '未知错误')}\n"
-                    }
-                await asyncio.sleep(0)
+            # 阶段2: 执行初步查询
+            # 使用agent的_execute_instructions方法，它会自动更新TaskContext
+            initial_results = await loop.run_in_executor(
+                None,
+                self.agent._execute_instructions,
+                instructions,
+                task_id,
+                task_context
+            )
+            
+            # 完成初始迭代
+            task_context.complete_iteration()
+            
+            # 生成基于TaskContext的thinking输出
+            progress_md = self._format_context_progress_markdown(task_context)
+            yield {
+                "type": "thinking",
+                "content": progress_md
+            }
+            await asyncio.sleep(0)
 
             # 阶段3: 评估是否需要下钻
             success_count = sum(1 for r in initial_results if r.get("status") == "success")
@@ -262,9 +229,11 @@ class StreamingAgentWrapper:
             drilldown_instructions = []
 
             if success_count > 0:
+                # 更新thinking输出
+                progress_md = self._format_context_progress_markdown(task_context)
                 yield {
                     "type": "thinking",
-                    "content": "\n【阶段3】评估是否需要深入分析\n"
+                    "content": progress_md
                 }
                 await asyncio.sleep(0)
 
@@ -276,9 +245,18 @@ class StreamingAgentWrapper:
                 )
 
                 if decision["need_drilldown"]:
+                    # 开始下钻迭代
+                    task_context.start_iteration(
+                        iteration_type="drilldown",
+                        name="深入分析",
+                        description=f"基于初步结果进行深入分析。理由: {decision['reasoning']}"
+                    )
+                    
+                    # 更新thinking输出
+                    progress_md = self._format_context_progress_markdown(task_context)
                     yield {
                         "type": "thinking",
-                        "content": f"🔬 需要深入分析\n理由: {decision['reasoning']}\n"
+                        "content": progress_md
                     }
                     await asyncio.sleep(0)
 
@@ -300,87 +278,46 @@ class StreamingAgentWrapper:
                     drilldown_instructions = self.agent._parse_instructions(drilldown_plan)
 
                     if drilldown_instructions:
+                        # 执行下钻查询
+                        drilldown_results = await loop.run_in_executor(
+                            None,
+                            self.agent._execute_instructions,
+                            drilldown_instructions,
+                            task_id,
+                            task_context
+                        )
+                        
+                        # 完成下钻迭代
+                        task_context.complete_iteration()
+                        
+                        # 更新thinking输出
+                        progress_md = self._format_context_progress_markdown(task_context)
                         yield {
                             "type": "thinking",
-                            "content": f"\n📊 执行 {len(drilldown_instructions)} 个深入查询\n"
+                            "content": progress_md
                         }
                         await asyncio.sleep(0)
-
-                        for i, inst in enumerate(drilldown_instructions, 1):
-                            inst_str = inst.get("task", str(inst)) if isinstance(inst, dict) else str(inst)
-
-                            yield {
-                                "type": "thinking",
-                                "content": f"🔍 深入查询 {i}/{len(drilldown_instructions)}: {inst_str[:80]}...\n"
-                            }
-                            await asyncio.sleep(0)
-
-                            # 流式执行下钻查询，实时输出 thinking
-                            result = None
-                            async for event in self._execute_engineer_streaming(inst_str, task_id):
-                                if event["type"] == "thinking":
-                                    # 转发 EngineerAgent 的 thinking
-                                    yield event
-                                    await asyncio.sleep(0)
-                                elif event["type"] == "result":
-                                    result = event["data"]
-
-                            if result:
-                                drilldown_results.append(result)
-
-                            if result.get("status") == "success":
-                                # 提取关键信息进行反馈
-                                feedback_parts = [f"✅ 深入查询 {i} 完成"]
-
-                                # 尝试提取行数信息
-                                if "rows" in result:
-                                    feedback_parts.append(f"数据行数: {result['rows']}")
-
-                                # 尝试提取CSV路径
-                                if "csv_path" in result:
-                                    csv_name = result['csv_path'].split('/')[-1]
-                                    feedback_parts.append(f"文件: {csv_name}")
-
-                                yield {
-                                    "type": "thinking",
-                                    "content": f"{', '.join(feedback_parts)}\n"
-                                }
-
-                                # 提取并显示SQL语句和CSV文件路径
-                                sql_info = self._extract_sql_and_csv(result)
-                                if sql_info:
-                                    yield {
-                                        "type": "thinking",
-                                        "content": sql_info
-                                    }
-                            else:
-                                yield {
-                                    "type": "thinking",
-                                    "content": f"❌ 深入查询 {i} 失败: {result.get('error', '未知错误')}\n"
-                                }
-                            await asyncio.sleep(0)
                 else:
+                    # 更新thinking输出
+                    progress_md = self._format_context_progress_markdown(task_context)
                     yield {
                         "type": "thinking",
-                        "content": "✓ 初步结果已足够，无需深入分析\n"
+                        "content": progress_md
                     }
                     await asyncio.sleep(0)
 
             # 阶段4: 生成最终答案
-            yield {
-                "type": "thinking",
-                "content": "\n【阶段4】综合分析并生成报告\n"
-            }
-            await asyncio.sleep(0)
-
             all_results = initial_results + drilldown_results
             all_instructions = instructions + drilldown_instructions
 
-            # 统计成功的查询数量
-            total_success = sum(1 for r in all_results if r.get("status") == "success")
+            # 标记任务完成
+            task_context.completed_at = datetime.now()
+            
+            # 生成最终的thinking输出
+            progress_md = self._format_context_progress_markdown(task_context)
             yield {
                 "type": "thinking",
-                "content": f"📊 汇总数据: 共 {len(all_results)} 个查询, {total_success} 个成功\n"
+                "content": progress_md
             }
             await asyncio.sleep(0)
 
@@ -457,6 +394,120 @@ class StreamingAgentWrapper:
                     break
 
         return '\n'.join(summary_lines) if summary_lines else "分析用户问题并生成查询计划"
+
+    def _format_context_progress_markdown(self, task_context) -> str:
+        """
+        基于TaskContext生成Markdown格式的进度报告
+        
+        Args:
+            task_context: TaskContext对象
+            
+        Returns:
+            Markdown格式的进度报告
+        """
+        from src.models.task_context import TaskContext
+        
+        if not isinstance(task_context, TaskContext):
+            return ""
+        
+        lines = []
+        
+        # 任务基本信息
+        lines.append("## 📋 任务执行进度")
+        lines.append("")
+        lines.append(f"**任务ID:** `{task_context.task_id}`")
+        lines.append(f"**用户问题:** {task_context.user_question}")
+        lines.append(f"**状态:** {'✅ 已完成' if task_context.completed_at else '🔄 执行中'}")
+        lines.append("")
+        
+        # 迭代进度
+        if task_context.iterations:
+            lines.append("### 🔄 执行阶段")
+            lines.append("")
+            
+            for iteration in task_context.iterations:
+                # 迭代状态
+                status_icon = "✅" if iteration.completed_at else "🔄"
+                lines.append(f"#### {status_icon} {iteration.name}")
+                lines.append("")
+                
+                if iteration.description:
+                    lines.append(f"*{iteration.description}*")
+                    lines.append("")
+                
+                # 迭代统计
+                total_queries = len(iteration.queries)
+                successful_queries = sum(1 for q in iteration.queries if q.status == "success")
+                failed_queries = sum(1 for q in iteration.queries if q.status == "failed")
+                cached_queries = sum(1 for q in iteration.queries if q.from_cache)
+                
+                lines.append(f"- **查询总数:** {total_queries}")
+                lines.append(f"- **成功:** {successful_queries} ✅")
+                if failed_queries > 0:
+                    lines.append(f"- **失败:** {failed_queries} ❌")
+                if cached_queries > 0:
+                    lines.append(f"- **缓存:** {cached_queries} ⚡")
+                lines.append("")
+                
+                # 查询详情
+                if iteration.queries:
+                    lines.append("**查询详情:**")
+                    lines.append("")
+                    
+                    for query in iteration.queries:
+                        query_status_icon = {
+                            "success": "✅",
+                            "failed": "❌",
+                            "partial": "⚠️",
+                            "pending": "⏳"
+                        }.get(query.status, "❓")
+                        
+                        cache_mark = " (缓存)" if query.from_cache else ""
+                        lines.append(f"{query_status_icon} **查询 {query.query_sequence}:** {query.instruction[:100]}{'...' if len(query.instruction) > 100 else ''}{cache_mark}")
+                        
+                        # SQL信息
+                        if query.sql:
+                            lines.append(f"  - **SQL:** 已生成")
+                            if query.sql_execution_time_ms:
+                                lines.append(f"  - **执行时间:** {query.sql_execution_time_ms}ms")
+                        
+                        # 数据信息
+                        if query.csv_path:
+                            lines.append(f"  - **数据文件:** `{query.csv_path.split('/')[-1]}`")
+                            if query.data_result_row_count > 0:
+                                lines.append(f"  - **数据行数:** {query.data_result_row_count:,} 行")
+                            if query.data_result_column_count:
+                                lines.append(f"  - **列数:** {query.data_result_column_count} 列")
+                        
+                        # 错误信息
+                        if query.status == "failed" and query.error:
+                            lines.append(f"  - **错误:** {query.error[:200]}")
+                        
+                        lines.append("")
+                
+                # 迭代完成时间
+                if iteration.completed_at:
+                    duration = (iteration.completed_at - iteration.started_at).total_seconds()
+                    lines.append(f"*完成时间: {iteration.completed_at.strftime('%H:%M:%S')} (耗时: {duration:.1f}秒)*")
+                    lines.append("")
+        
+        # 总体统计
+        all_queries = task_context.get_all_queries()
+        if all_queries:
+            lines.append("### 📊 总体统计")
+            lines.append("")
+            lines.append(f"- **总查询数:** {len(all_queries)}")
+            lines.append(f"- **成功查询:** {len(task_context.get_successful_queries())}")
+            lines.append(f"- **失败查询:** {len(task_context.get_failed_queries())}")
+            
+            csv_files = task_context.get_all_csv_files()
+            if csv_files:
+                total_rows = sum(f["row_count"] for f in csv_files)
+                lines.append(f"- **生成文件:** {len(csv_files)} 个")
+                lines.append(f"- **总数据行数:** {total_rows:,} 行")
+            lines.append("")
+        
+        return "\n".join(lines)
 
     async def _execute_engineer_streaming(self, instruction: str, task_id: Optional[str] = None):
         """

@@ -23,6 +23,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 config/__pycache__
+**/__pycache__
 *.pyc
 
 # Virtual Environment

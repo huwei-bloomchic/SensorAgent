@@ -265,7 +265,7 @@ result = sql_execution(sql=生成的SQL, filename="product_clicks.csv")
         task_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        执行来自上层Agent的指令
+        执行来自上层Agent的指令 (非流式版本，用于向后兼容)
 
         Args:
             instruction: 自然语言指令
@@ -274,6 +274,38 @@ result = sql_execution(sql=生成的SQL, filename="product_clicks.csv")
 
         Returns:
             查询结果
+        """
+        # 使用流式版本，但收集所有结果后返回
+        final_result = None
+        for event in self.execute_instruction_streaming(instruction, context, task_id):
+            if event["type"] == "result":
+                final_result = event["data"]
+
+        return final_result if final_result else {
+            "status": "error",
+            "instruction": instruction,
+            "error": "No result returned from streaming execution",
+            "timestamp": datetime.now().isoformat()
+        }
+
+    def execute_instruction_streaming(
+        self,
+        instruction: str,
+        context: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None
+    ):
+        """
+        执行来自上层Agent的指令 (流式版本)
+
+        Args:
+            instruction: 自然语言指令
+            context: 上下文信息(可选)
+            task_id: 任务ID，用于CSV文件命名(可选)
+
+        Yields:
+            Dict[str, Any]: 执行过程中的事件
+                - {"type": "thinking", "content": str} - 思考过程
+                - {"type": "result", "data": Dict} - 最终结果
         """
         logger.info("=" * 80)
         logger.info(f"[EngineerAgent] 收到指令: {instruction}")
@@ -295,31 +327,63 @@ result = sql_execution(sql=生成的SQL, filename="product_clicks.csv")
 
             full_prompt = f"{system_prompt}{task_id_info}\n\n【指令】\n{instruction}{context_info}"
 
-            # 调用Agent执行
-            logger.info("[EngineerAgent] 开始执行指令...")
-            result = self.agent.run(full_prompt)
+            # 调用Agent执行 (流式模式)
+            logger.info("[EngineerAgent] 开始执行指令 (流式模式)...")
+
+            yield {
+                "type": "thinking",
+                "content": f"🔧 EngineerAgent 开始执行: {instruction[:100]}...\n"
+            }
+
+            final_result = None
+            step_count = 0
+
+            # 使用 stream=True 来获取执行过程
+            for step in self.agent.run(full_prompt, stream=True):
+                step_count += 1
+
+                # 提取 thinking 信息
+                thinking_content = self._extract_thinking_from_step(step, step_count)
+                if thinking_content:
+                    yield {
+                        "type": "thinking",
+                        "content": thinking_content
+                    }
+
+                # 检查是否是最终结果
+                if hasattr(step, 'is_final_answer') and step.is_final_answer:
+                    if hasattr(step, 'action_output'):
+                        final_result = step.action_output
+                    elif hasattr(step, 'output'):
+                        final_result = step.output
 
             logger.info("[EngineerAgent] 指令执行完成")
-            logger.debug(f"[执行结果]\n{result}")
+            logger.debug(f"[执行结果]\n{final_result}")
 
             # 检查结果是否有效
-            if result is None or result == "":
+            if final_result is None or final_result == "":
                 logger.warning("[EngineerAgent] Agent返回了空结果，可能达到了最大步数限制")
-                return {
-                    "status": "partial",
-                    "instruction": instruction,
-                    "result": "任务未完成：达到最大推理步数限制(max_steps=15)。可能原因：任务过于复杂或需要更多步骤。建议简化查询。",
-                    "error": "Reached max steps without final answer",
-                    "timestamp": datetime.now().isoformat()
+                yield {
+                    "type": "result",
+                    "data": {
+                        "status": "partial",
+                        "instruction": instruction,
+                        "result": "任务未完成：达到最大推理步数限制(max_steps=15)。可能原因：任务过于复杂或需要更多步骤。建议简化查询。",
+                        "error": "Reached max steps without final answer",
+                        "timestamp": datetime.now().isoformat()
+                    }
                 }
-
-            # 返回结构化结果
-            return {
-                "status": "success",
-                "instruction": instruction,
-                "result": result,
-                "timestamp": datetime.now().isoformat()
-            }
+            else:
+                # 返回结构化结果
+                yield {
+                    "type": "result",
+                    "data": {
+                        "status": "success",
+                        "instruction": instruction,
+                        "result": final_result,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                }
 
         except Exception as e:
             error_msg = str(e)
@@ -328,20 +392,81 @@ result = sql_execution(sql=生成的SQL, filename="product_clicks.csv")
             # 检查是否是max_steps错误
             if "max" in error_msg.lower() and "step" in error_msg.lower():
                 logger.warning("[EngineerAgent] 达到最大步数限制")
-                return {
-                    "status": "partial",
-                    "instruction": instruction,
-                    "result": "任务未完成：达到最大推理步数限制(max_steps=15)。可能原因：任务过于复杂或需要更多步骤。建议简化查询。",
-                    "error": error_msg,
-                    "timestamp": datetime.now().isoformat()
+                yield {
+                    "type": "result",
+                    "data": {
+                        "status": "partial",
+                        "instruction": instruction,
+                        "result": "任务未完成：达到最大推理步数限制(max_steps=15)。可能原因：任务过于复杂或需要更多步骤。建议简化查询。",
+                        "error": error_msg,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                }
+            else:
+                yield {
+                    "type": "result",
+                    "data": {
+                        "status": "error",
+                        "instruction": instruction,
+                        "error": error_msg,
+                        "timestamp": datetime.now().isoformat()
+                    }
                 }
 
-            return {
-                "status": "error",
-                "instruction": instruction,
-                "error": error_msg,
-                "timestamp": datetime.now().isoformat()
-            }
+    def _extract_thinking_from_step(self, step, step_number: int) -> Optional[str]:
+        """
+        从 Agent 的执行步骤中提取 thinking 内容
+
+        Args:
+            step: smolagents 的 step 对象
+            step_number: 步骤编号
+
+        Returns:
+            thinking 内容字符串，如果没有则返回 None
+        """
+        from smolagents.agents import ActionStep, PlanningStep, FinalAnswerStep
+
+        thinking_parts = []
+
+        # PlanningStep: 规划阶段
+        if isinstance(step, PlanningStep):
+            if hasattr(step, 'plan') and step.plan:
+                thinking_parts.append(f"📋 步骤 {step_number}: 规划\n{step.plan}\n")
+
+        # ActionStep: 执行动作
+        elif isinstance(step, ActionStep):
+            # 模型输出 (包含 Thought)
+            if hasattr(step, 'model_output') and step.model_output:
+                output_str = str(step.model_output)
+                # 提取 Thought 部分
+                if "Thought:" in output_str or "思考:" in output_str:
+                    thinking_parts.append(f"💭 步骤 {step_number}: {output_str[:500]}\n")
+
+            # 工具调用
+            if hasattr(step, 'tool_calls') and step.tool_calls:
+                for tool_call in step.tool_calls:
+                    tool_name = getattr(tool_call, 'name', 'unknown')
+                    thinking_parts.append(f"🔧 调用工具: {tool_name}\n")
+
+            # 执行的代码
+            if hasattr(step, 'code_action') and step.code_action:
+                code_preview = step.code_action[:200]
+                thinking_parts.append(f"💻 执行代码:\n{code_preview}...\n")
+
+            # 观察结果
+            if hasattr(step, 'observations') and step.observations:
+                obs_preview = str(step.observations)[:300]
+                thinking_parts.append(f"👁️ 观察结果:\n{obs_preview}...\n")
+
+            # 错误信息
+            if hasattr(step, 'error') and step.error:
+                thinking_parts.append(f"❌ 错误: {step.error}\n")
+
+        # FinalAnswerStep: 最终答案
+        elif isinstance(step, FinalAnswerStep):
+            thinking_parts.append(f"✅ 步骤 {step_number}: 生成最终答案\n")
+
+        return "".join(thinking_parts) if thinking_parts else None
 
     def validate_sql(self, sql: str) -> Dict[str, Any]:
         """

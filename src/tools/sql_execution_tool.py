@@ -277,104 +277,158 @@ result = sql_execution(
         except Exception as e:
             logger.warning(f"清理旧文件时出错: {e}")
 
-    def _format_result(self, csv_path: str, df: pd.DataFrame, raw_result: Dict[str, Any]) -> str:
+    def _format_result(self, csv_path: str, df: pd.DataFrame, raw_result: Dict[str, Any], sql: str = "") -> str:
         """
-        格式化输出结果
+        格式化输出结果，返回JSON格式的字符串
 
         Args:
             csv_path: CSV文件路径
             df: DataFrame
             raw_result: 原始API结果
+            sql: 执行的SQL语句
 
         Returns:
-            格式化的结果字符串
+            JSON格式的结果字符串
         """
-        lines = ["=" * 60]
-        lines.append("SQL 查询执行完成")
-        lines.append("=" * 60)
-        lines.append("")
-
-        # CSV文件信息 - 生成可点击的下载链接
         csv_filename = os.path.basename(csv_path)
 
         # 如果配置了base_url，生成HTTP下载链接
         if self.base_url:
             download_url = f"{self.base_url.rstrip('/')}/files/{csv_filename}"
-            lines.append(f"✅ CSV 文件: [{csv_filename}]({download_url})")
-            lines.append(f"📥 下载链接: {download_url}")
         else:
-            # 否则使用本地文件路径
-            lines.append(f"✅ CSV 文件: [{csv_filename}]({csv_path})")
-            lines.append(f"📁 本地路径: {csv_path}")
+            download_url = f"file://{csv_path}"
 
-        lines.append(f"📊 行数: {len(df)}")
-        lines.append(f"📋 列: {list(df.columns)}")
-        lines.append("")
-
-        # 数据输出（最多显示50行）
-        if len(df) > 0:
-            max_display_rows = 50
-            display_df = df.head(max_display_rows)
-
-            lines.append("## 完整数据")
-            lines.append("-" * 60)
-
-            # 格式化显示数据
-            full_data_str = display_df.to_string(index=False)
-            lines.append(full_data_str)
-
-            lines.append("")
-            if len(df) > max_display_rows:
-                lines.append(f"⚠️ 仅显示前 {max_display_rows} 行，完整数据请查看CSV文件")
-                lines.append(f"✅ 总共 {len(df)} 行数据")
-            else:
-                lines.append(f"✅ 共 {len(df)} 行数据")
-        else:
-            lines.append("⚠️ 查询结果为空")
-
-        lines.append("")
-        lines.append("=" * 60)
-
-        # 添加结构化数据供后续处理
-        structured_data = {
+        # 构建结构化数据
+        result_data = {
+            "status": "success",
+            "task_id": self._extract_task_id_from_filename(csv_filename),
             "csv_path": csv_path,
+            "download_url": download_url,
             "rows": len(df),
-            "columns": list(df.columns)
+            "columns": list(df.columns),
         }
+
+        # 提取查询信息
+        query_info = {}
 
         # 尝试提取日期范围
         if 'date' in df.columns and len(df) > 0:
             try:
                 dates = df['date'].dropna().tolist()
                 if dates:
-                    structured_data["date_range"] = [min(dates), max(dates)]
+                    min_date = min(dates)
+                    max_date = max(dates)
+                    query_info["date_range"] = f"{min_date} 到 {max_date}"
             except:
                 pass
 
-        # 添加基本统计信息
+        # 尝试从SQL提取事件信息
+        if sql:
+            import re
+            # 提取事件名称
+            event_match = re.findall(r"event\s*(?:=|IN)\s*\(?'([^']+)'", sql, re.IGNORECASE)
+            if event_match:
+                query_info["events_analyzed"] = event_match
+
+        # 统计总记录数
         if len(df) > 0:
-            summary_stats = {}
-            for col in df.columns:
-                if pd.api.types.is_numeric_dtype(df[col]):
+            query_info["total_records"] = len(df)
+
+        if query_info:
+            result_data["query_info"] = query_info
+
+        # 生成数据预览（分组展示）
+        data_preview = {}
+        if len(df) > 0:
+            # 检查是否有事件分组
+            if 'event' in df.columns or '事件名称' in df.columns:
+                event_col = 'event' if 'event' in df.columns else '事件名称'
+
+                # 按事件和平台分组
+                if 'web_platform_type' in df.columns or '平台类型' in df.columns:
+                    platform_col = 'web_platform_type' if 'web_platform_type' in df.columns else '平台类型'
+
+                    for event in df[event_col].unique():
+                        event_data = df[df[event_col] == event]
+                        event_preview = {}
+
+                        for platform in event_data[platform_col].unique():
+                            platform_data = event_data[event_data[platform_col] == platform]
+
+                            # 提取关键指标
+                            preview_item = {}
+                            if '总记录数' in platform_data.columns:
+                                preview_item['total'] = int(platform_data['总记录数'].iloc[0])
+
+                            # 提取填充率信息
+                            for col in platform_data.columns:
+                                if '填充率' in col:
+                                    preview_item[col.replace('%', '')] = f"{platform_data[col].iloc[0]}%"
+
+                            event_preview[str(platform)] = preview_item
+
+                        data_preview[str(event)] = event_preview
+                else:
+                    # 只有事件分组，没有平台
+                    for event in df[event_col].unique():
+                        event_data = df[df[event_col] == event]
+                        preview_item = {}
+
+                        if '总记录数' in event_data.columns:
+                            preview_item['total'] = int(event_data['总记录数'].iloc[0])
+
+                        for col in event_data.columns:
+                            if '填充率' in col:
+                                preview_item[col.replace('%', '')] = f"{event_data[col].iloc[0]}%"
+
+                        data_preview[str(event)] = preview_item
+
+        if data_preview:
+            result_data["data_preview"] = data_preview
+
+        # 生成关键发现
+        key_findings = []
+        if len(df) > 0:
+            # 根据数据特点自动生成关键发现
+            if 'event' in df.columns or '事件名称' in df.columns:
+                event_col = 'event' if 'event' in df.columns else '事件名称'
+                key_findings.append(f"📊 分析了 {df[event_col].nunique()} 个事件，共 {len(df)} 条记录")
+
+            # 检查填充率字段
+            fill_rate_cols = [col for col in df.columns if '填充率' in col]
+            if fill_rate_cols:
+                for col in fill_rate_cols:
                     try:
-                        summary_stats[col] = {
-                            "mean": float(df[col].mean()),
-                            "min": float(df[col].min()),
-                            "max": float(df[col].max()),
-                            "sum": float(df[col].sum())
-                        }
+                        avg_rate = df[col].mean()
+                        key_findings.append(f"📈 {col}平均值: {avg_rate:.2f}%")
                     except:
                         pass
 
-            if summary_stats:
-                structured_data["summary_stats"] = summary_stats
+        if key_findings:
+            result_data["key_findings"] = key_findings
 
-        lines.append("")
-        lines.append("<structured_data>")
-        lines.append(json.dumps(structured_data, ensure_ascii=False, indent=2))
-        lines.append("</structured_data>")
+        # 添加执行的SQL
+        if sql:
+            result_data["sql_executed"] = sql
 
-        return "\n".join(lines)
+        # 返回JSON字符串
+        return json.dumps(result_data, ensure_ascii=False, indent=2)
+
+    def _extract_task_id_from_filename(self, filename: str) -> str:
+        """
+        从文件名中提取task_id
+
+        Args:
+            filename: 文件名，例如 "task_b72c690f_cdp_tag_fill_rate.csv"
+
+        Returns:
+            task_id，如果无法提取则返回空字符串
+        """
+        import re
+        match = re.match(r'task_([a-f0-9]+)_', filename)
+        if match:
+            return match.group(1)
+        return ""
 
     def forward(self, sql: str, output_dir: Optional[str] = None, filename: Optional[str] = None) -> str:
         """
@@ -450,7 +504,7 @@ result = sql_execution(
             logger.info(f"[步骤 5/5] ✓ 清理完成 (耗时: {step_elapsed:.2f}秒)")
 
             # 6. 格式化返回结果
-            output = self._format_result(csv_path, df, result)
+            output = self._format_result(csv_path, df, result, sql=sql)
 
             tool_elapsed = time.time() - tool_start_time
             logger.info("=" * 60)

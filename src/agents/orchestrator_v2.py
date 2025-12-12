@@ -454,85 +454,94 @@ class SensorsAnalyticsAgentV2:
             lines.append("## 核心指标")
             lines.append("")
 
-            summary = data.get("summary", {})
-            if summary:
-                # 时间范围
-                if "date_range" in summary:
-                    date_range = summary["date_range"]
-                    lines.append(f"- **查询时间范围:** {date_range[0]} 至 {date_range[1]}")
+            # 从query_info中提取信息
+            query_info = data.get("query_info", {})
+            if query_info:
+                if "date_range" in query_info:
+                    lines.append(f"- **查询时间范围:** {query_info['date_range']}")
 
-                # 订单总数
-                if "total_orders" in summary:
-                    lines.append(f"- **订单总数:** {summary['total_orders']:,}")
+                if "total_records" in query_info:
+                    lines.append(f"- **总记录数:** {query_info['total_records']:,}")
 
-                # 渠道数量
-                if "total_channels" in summary:
-                    lines.append(f"- **渠道数量:** {summary['total_channels']}")
-
-                # Top渠道
-                if "top_channel" in summary:
-                    top = summary["top_channel"]
-                    lines.append(f"- **最大渠道:** {top['name']} (订单数: {top['orders']:,}, GMV: ${top['gmv']:,.2f})")
+                if "events_analyzed" in query_info:
+                    events = query_info["events_analyzed"]
+                    if isinstance(events, list):
+                        lines.append(f"- **分析事件:** {', '.join(events)}")
+                    else:
+                        lines.append(f"- **分析事件:** {events}")
 
                 lines.append("")
 
             # 添加数据预览
-            lines.append("## 数据预览")
-            lines.append("")
+            data_preview = data.get("data_preview", {})
+            if data_preview:
+                lines.append("## 数据预览")
+                lines.append("")
 
-            preview = data.get("preview", "")
-            if preview:
-                # 解析预览文本并转换为表格
-                preview_lines = preview.strip().split('\n')
+                # 遍历事件
+                for event_name, event_data in data_preview.items():
+                    lines.append(f"### {event_name}")
+                    lines.append("")
 
-                # 查找表格部分
-                table_start = -1
-                for i, line in enumerate(preview_lines):
-                    if '渠道' in line and '订单数量' in line:
-                        table_start = i
-                        break
+                    # 如果事件数据是字典（可能包含平台分组）
+                    if isinstance(event_data, dict):
+                        # 检查是否有平台分组
+                        first_value = next(iter(event_data.values())) if event_data else None
 
-                if table_start >= 0:
-                    # 输出标题
-                    lines.append("| 排名 | 渠道 | 订单数量 | GMV |")
-                    lines.append("|------|------|----------|-----|")
+                        if isinstance(first_value, dict) and 'total' in first_value:
+                            # 有平台分组
+                            lines.append("| 平台 | 总记录数 | 填充率 |")
+                            lines.append("|------|----------|--------|")
 
-                    # 输出数据行
-                    data_lines = preview_lines[table_start + 2:]  # 跳过标题和分隔线
-                    for line in data_lines:
-                        if line.strip() and not line.startswith('-') and not line.startswith('...'):
-                            # 解析每一行: "1. facebook      57,385    $4,084,836.73"
-                            parts = line.strip().split()
-                            if len(parts) >= 3:
-                                rank = parts[0].rstrip('.')
-                                channel = parts[1]
-                                orders = parts[2] if len(parts) > 2 else '-'
-                                gmv = parts[3] if len(parts) > 3 else '-'
-                                lines.append(f"| {rank} | {channel} | {orders} | {gmv} |")
-                else:
-                    # 如果无法解析为表格，直接输出原始预览
-                    lines.append("```")
-                    lines.append(preview)
-                    lines.append("```")
+                            for platform, metrics in event_data.items():
+                                total = metrics.get('total', '-')
+                                # 提取填充率（可能有多个填充率字段）
+                                fill_rates = []
+                                for key, value in metrics.items():
+                                    if 'fill_rate' in key or '填充率' in key:
+                                        fill_rates.append(value)
 
-            lines.append("")
+                                fill_rate_str = ', '.join(fill_rates) if fill_rates else '-'
+                                lines.append(f"| {platform} | {total:,} | {fill_rate_str} |")
+                        else:
+                            # 没有平台分组，直接显示指标
+                            for key, value in event_data.items():
+                                lines.append(f"- **{key}:** {value}")
+
+                    lines.append("")
+
+            # 添加关键发现
+            key_findings = data.get("key_findings", [])
+            if key_findings:
+                lines.append("## 关键发现")
+                lines.append("")
+                for finding in key_findings:
+                    lines.append(f"- {finding}")
+                lines.append("")
 
             # 添加完整数据文件信息
             lines.append("## 完整数据")
             lines.append("")
-            lines.append(f"- **CSV文件路径:** `{data.get('csv_path', 'N/A')}`")
-            lines.append(f"- **数据行数:** {data.get('rows', 'N/A')}")
+
+            # 添加下载链接
+            if "download_url" in data:
+                csv_filename = data.get('csv_path', '').split('/')[-1]
+                download_url = data.get('download_url')
+                lines.append(f"- **CSV文件:** [{csv_filename}]({download_url})")
+            else:
+                lines.append(f"- **CSV文件路径:** `{data.get('csv_path', 'N/A')}`")
+
+            lines.append(f"- **数据行数:** {data.get('rows', 'N/A'):,}")
             lines.append(f"- **数据列:** {', '.join(data.get('columns', []))}")
             lines.append("")
 
-            # 添加查询信息
-            if "query_info" in summary:
-                query_info = summary["query_info"]
-                lines.append("## 查询详情")
+            # 添加执行的SQL
+            if "sql_executed" in data:
+                lines.append("## 执行的SQL")
                 lines.append("")
-                lines.append(f"- **事件类型:** {query_info.get('event', 'N/A')}")
-                lines.append(f"- **国家筛选:** {query_info.get('country_filter', 'N/A')}")
-                lines.append(f"- **爬虫过滤:** {query_info.get('spider_filter', 'N/A')}")
+                lines.append("```sql")
+                lines.append(data["sql_executed"])
+                lines.append("```")
                 lines.append("")
 
             lines.append("---")

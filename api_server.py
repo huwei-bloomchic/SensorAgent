@@ -210,16 +210,18 @@ class StreamingAgentWrapper:
                 }
                 await asyncio.sleep(0)
 
-                # 在线程池中执行查询，传递task_id
-                def execute_with_task_id():
-                    return self.agent.engineer_agent.execute_instruction(
-                        inst_str,
-                        context=None,
-                        task_id=task_id
-                    )
+                # 流式执行查询，实时输出 thinking
+                result = None
+                async for event in self._execute_engineer_streaming(inst_str, task_id):
+                    if event["type"] == "thinking":
+                        # 转发 EngineerAgent 的 thinking
+                        yield event
+                        await asyncio.sleep(0)
+                    elif event["type"] == "result":
+                        result = event["data"]
 
-                result = await loop.run_in_executor(None, execute_with_task_id)
-                initial_results.append(result)
+                if result:
+                    initial_results.append(result)
 
                 if result.get("status") == "success":
                     # 提取关键信息进行反馈
@@ -313,16 +315,18 @@ class StreamingAgentWrapper:
                             }
                             await asyncio.sleep(0)
 
-                            # 在线程池中执行下钻查询，传递task_id
-                            def execute_drilldown_with_task_id():
-                                return self.agent.engineer_agent.execute_instruction(
-                                    inst_str,
-                                    context=None,
-                                    task_id=task_id
-                                )
+                            # 流式执行下钻查询，实时输出 thinking
+                            result = None
+                            async for event in self._execute_engineer_streaming(inst_str, task_id):
+                                if event["type"] == "thinking":
+                                    # 转发 EngineerAgent 的 thinking
+                                    yield event
+                                    await asyncio.sleep(0)
+                                elif event["type"] == "result":
+                                    result = event["data"]
 
-                            result = await loop.run_in_executor(None, execute_drilldown_with_task_id)
-                            drilldown_results.append(result)
+                            if result:
+                                drilldown_results.append(result)
 
                             if result.get("status") == "success":
                                 # 提取关键信息进行反馈
@@ -449,6 +453,71 @@ class StreamingAgentWrapper:
                     break
 
         return '\n'.join(summary_lines) if summary_lines else "分析用户问题并生成查询计划"
+
+    async def _execute_engineer_streaming(self, instruction: str, task_id: Optional[str] = None):
+        """
+        在异步上下文中流式执行 EngineerAgent 的指令
+
+        Args:
+            instruction: 指令内容
+            task_id: 任务ID
+
+        Yields:
+            Dict: 事件字典，包含 type 和相关数据
+        """
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        loop = asyncio.get_event_loop()
+
+        # 创建一个队列用于线程间通信
+        import queue
+        event_queue = queue.Queue()
+
+        def run_streaming():
+            """在线程中运行流式执行"""
+            try:
+                for event in self.agent.engineer_agent.execute_instruction_streaming(
+                    instruction,
+                    context=None,
+                    task_id=task_id
+                ):
+                    event_queue.put(("event", event))
+            except Exception as e:
+                event_queue.put(("error", str(e)))
+            finally:
+                event_queue.put(("done", None))
+
+        # 在线程池中启动执行
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(run_streaming)
+
+        # 持续从队列中读取事件
+        while True:
+            try:
+                # 非阻塞地检查队列
+                msg_type, data = await loop.run_in_executor(None, event_queue.get, True, 0.1)
+
+                if msg_type == "done":
+                    break
+                elif msg_type == "error":
+                    yield {
+                        "type": "result",
+                        "data": {
+                            "status": "error",
+                            "error": data,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    }
+                    break
+                elif msg_type == "event":
+                    yield data
+
+            except:
+                # 队列为空，继续等待
+                await asyncio.sleep(0.05)
+
+        executor.shutdown(wait=False)
 
     def _extract_sql_and_csv(self, result: Dict[str, Any]) -> Optional[str]:
         """

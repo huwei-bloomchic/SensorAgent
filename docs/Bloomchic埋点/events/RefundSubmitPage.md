@@ -21,3 +21,5 @@
 | `partial_refund_product_skus` | 部分退款的商品ID |  |  |  |  |  |  |
 | `partial_refund_product_spus` | 部分退款的商品SPU(去重) |  |  |  |  |  |  |
 | `partial_refund_product_ids` | 部分退款的商品SKU(去重) |  |  |  |  |  |  |
+| `selected_logistic_code` | 选中的物流渠道名 |  | 曝光时默认选择的渠道  |  |  |  |  |
+| `selected_logistic_shipping_fee` | 选中的物流渠道金额 | 曝光时默认选择的渠道 |  |  |  |  |  |

@@ -1,0 +1,611 @@
+#!/usr/bin/env python3
+"""
+神策数据分析助手 - OpenAPI服务器
+提供兼容OpenAI格式的 /v1/chat/completions 接口
+"""
+import sys
+import json
+import asyncio
+import uuid
+from pathlib import Path
+from typing import Optional, List, Dict, Any, AsyncGenerator
+from datetime import datetime
+
+# 添加项目根目录到Python路径
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from loguru import logger
+
+from config.settings import get_settings
+from src.agents.orchestrator_v2 import create_agent_v2
+
+
+# ============ Pydantic模型定义 ============
+
+class Message(BaseModel):
+    """聊天消息"""
+    role: str = Field(..., description="角色: system/user/assistant")
+    content: str = Field(..., description="消息内容")
+
+
+class ChatCompletionRequest(BaseModel):
+    """Chat Completion请求"""
+    model: str = Field(default="sensors-agent", description="模型名称")
+    messages: List[Message] = Field(..., description="消息列表")
+    stream: bool = Field(default=False, description="是否流式返回")
+    temperature: Optional[float] = Field(default=0.7, description="温度参数")
+    max_tokens: Optional[int] = Field(default=None, description="最大token数")
+    top_p: Optional[float] = Field(default=1.0, description="Top-p采样")
+
+
+class ChatCompletionChoice(BaseModel):
+    """Chat Completion选择"""
+    index: int
+    message: Message
+    finish_reason: str
+
+
+class Usage(BaseModel):
+    """Token使用统计"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ChatCompletionResponse(BaseModel):
+    """Chat Completion响应"""
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[ChatCompletionChoice]
+    usage: Usage
+
+
+class DeltaMessage(BaseModel):
+    """流式响应的增量消息"""
+    role: Optional[str] = None
+    content: Optional[str] = None
+
+
+class ChatCompletionStreamChoice(BaseModel):
+    """流式响应的选择"""
+    index: int
+    delta: DeltaMessage
+    finish_reason: Optional[str] = None
+
+
+class ChatCompletionStreamResponse(BaseModel):
+    """流式响应"""
+    id: str
+    object: str = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: List[ChatCompletionStreamChoice]
+
+
+# ============ FastAPI应用 ============
+
+app = FastAPI(
+    title="神策数据分析助手 API",
+    description="提供兼容OpenAI格式的聊天API，支持神策数据分析",
+    version="2.0.0"
+)
+
+# 添加CORS支持
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 全局Agent实例
+agent = None
+settings = None
+
+
+# ============ Agent包装器 ============
+
+class StreamingAgentWrapper:
+    """
+    Agent包装器，支持流式返回thinking步骤和最终结果
+    """
+
+    def __init__(self, agent):
+        self.agent = agent
+
+    async def query_streaming(
+        self,
+        user_input: str
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        流式执行查询，yield中间步骤和最终结果
+
+        Yields:
+            {"type": "thinking", "content": "思考步骤内容"}
+            {"type": "answer", "content": "最终答案"}
+        """
+        try:
+            # 发送开始思考信号
+            yield {
+                "type": "thinking",
+                "content": "🤔 开始分析您的问题...\n"
+            }
+            await asyncio.sleep(0)  # 让出控制权，确保立即发送
+
+            # 阶段1: 初步分析
+            yield {
+                "type": "thinking",
+                "content": "\n【阶段1】上层分析Agent - 理解问题并制定计划\n"
+            }
+            await asyncio.sleep(0)
+
+            # 在线程池中调用同步方法
+            loop = asyncio.get_event_loop()
+            analysis_result = await loop.run_in_executor(
+                None,
+                self.agent.analyst_agent.analyze,
+                user_input,
+                "initial"
+            )
+            analysis_plan = analysis_result.get("analysis_plan", "")
+
+            # 发送分析计划
+            plan_summary = self._extract_plan_summary(analysis_plan)
+            yield {
+                "type": "thinking",
+                "content": f"📋 分析计划:\n{plan_summary}\n"
+            }
+            await asyncio.sleep(0)
+
+            # 解析指令
+            instructions = self.agent._parse_instructions(analysis_plan)
+
+            if instructions:
+                yield {
+                    "type": "thinking",
+                    "content": f"\n📝 识别到 {len(instructions)} 个查询任务\n"
+                }
+            else:
+                yield {
+                    "type": "thinking",
+                    "content": "\n⚠️ 未能提取具体指令，将直接执行查询\n"
+                }
+                instructions = [{
+                    "task": user_input,
+                    "time_range": "last_7_days"
+                }]
+            await asyncio.sleep(0)
+
+            # 阶段2: 执行初步查询
+            yield {
+                "type": "thinking",
+                "content": "\n【阶段2】下层SQL执行Agent - 执行数据查询\n"
+            }
+            await asyncio.sleep(0)
+
+            initial_results = []
+            for i, inst in enumerate(instructions, 1):
+                inst_str = inst.get("task", str(inst)) if isinstance(inst, dict) else str(inst)
+
+                yield {
+                    "type": "thinking",
+                    "content": f"🔍 执行任务 {i}/{len(instructions)}: {inst_str[:50]}...\n"
+                }
+                await asyncio.sleep(0)
+
+                # 在线程池中执行查询
+                result = await loop.run_in_executor(
+                    None,
+                    self.agent.engineer_agent.execute_instruction,
+                    inst_str
+                )
+                initial_results.append(result)
+
+                if result.get("status") == "success":
+                    yield {
+                        "type": "thinking",
+                        "content": f"✅ 任务 {i} 完成\n"
+                    }
+                else:
+                    yield {
+                        "type": "thinking",
+                        "content": f"❌ 任务 {i} 失败: {result.get('error', '未知错误')}\n"
+                    }
+                await asyncio.sleep(0)
+
+            # 阶段3: 评估是否需要下钻
+            success_count = sum(1 for r in initial_results if r.get("status") == "success")
+
+            drilldown_results = []
+            drilldown_instructions = []
+
+            if success_count > 0:
+                yield {
+                    "type": "thinking",
+                    "content": "\n【阶段3】评估是否需要深入分析\n"
+                }
+                await asyncio.sleep(0)
+
+                decision = await loop.run_in_executor(
+                    None,
+                    self.agent.analyst_agent.evaluate_and_decide_drilldown,
+                    user_input,
+                    initial_results
+                )
+
+                if decision["need_drilldown"]:
+                    yield {
+                        "type": "thinking",
+                        "content": f"🔬 需要深入分析\n理由: {decision['reasoning']}\n"
+                    }
+                    await asyncio.sleep(0)
+
+                    # 生成下钻指令
+                    context = {
+                        "initial_results": self.agent.analyst_agent._extract_results_summary(initial_results),
+                        "suggested_dimensions": decision["suggested_dimensions"]
+                    }
+
+                    def analyze_drilldown():
+                        return self.agent.analyst_agent.analyze(
+                            user_question=user_input,
+                            context=context,
+                            stage="drilldown"
+                        )
+
+                    drilldown_analysis = await loop.run_in_executor(None, analyze_drilldown)
+                    drilldown_plan = drilldown_analysis.get("analysis_plan", "")
+                    drilldown_instructions = self.agent._parse_instructions(drilldown_plan)
+
+                    if drilldown_instructions:
+                        yield {
+                            "type": "thinking",
+                            "content": f"\n📊 执行 {len(drilldown_instructions)} 个深入查询\n"
+                        }
+                        await asyncio.sleep(0)
+
+                        for i, inst in enumerate(drilldown_instructions, 1):
+                            inst_str = inst.get("task", str(inst)) if isinstance(inst, dict) else str(inst)
+
+                            yield {
+                                "type": "thinking",
+                                "content": f"🔍 深入查询 {i}: {inst_str[:50]}...\n"
+                            }
+                            await asyncio.sleep(0)
+
+                            result = await loop.run_in_executor(
+                                None,
+                                self.agent.engineer_agent.execute_instruction,
+                                inst_str
+                            )
+                            drilldown_results.append(result)
+
+                            if result.get("status") == "success":
+                                yield {
+                                    "type": "thinking",
+                                    "content": f"✅ 深入查询 {i} 完成\n"
+                                }
+                            await asyncio.sleep(0)
+                else:
+                    yield {
+                        "type": "thinking",
+                        "content": "✓ 初步结果已足够，无需深入分析\n"
+                    }
+                    await asyncio.sleep(0)
+
+            # 阶段4: 生成最终答案
+            yield {
+                "type": "thinking",
+                "content": "\n【阶段4】综合分析并生成报告\n"
+            }
+            await asyncio.sleep(0)
+
+            all_results = initial_results + drilldown_results
+            all_instructions = instructions + drilldown_instructions
+
+            # 生成最终答案
+            if len(all_results) == 1 and all_results[0].get("status") == "success" and not drilldown_results:
+                final_answer = await loop.run_in_executor(
+                    None,
+                    self.agent._format_single_result_to_markdown,
+                    user_input,
+                    all_results[0]
+                )
+            else:
+                def generate_final():
+                    synthesis_report = self.agent.analyst_agent.synthesize_results(
+                        instructions=all_instructions,
+                        results=all_results
+                    )
+                    return self.agent._format_final_output(
+                        analysis_plan=analysis_plan,
+                        initial_results=initial_results,
+                        drilldown_results=drilldown_results,
+                        synthesis_report=synthesis_report
+                    )
+
+                final_answer = await loop.run_in_executor(None, generate_final)
+
+            # 发送最终答案
+            yield {
+                "type": "answer",
+                "content": final_answer
+            }
+
+        except Exception as e:
+            logger.exception("流式查询处理失败")
+            yield {
+                "type": "error",
+                "content": f"处理查询时发生错误: {str(e)}"
+            }
+
+    def _extract_plan_summary(self, analysis_plan: str) -> str:
+        """提取分析计划摘要"""
+        lines = analysis_plan.split('\n')
+        summary_lines = []
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith('```') or line.startswith('{') or line.startswith('['):
+                continue
+            if line and not line.startswith('#'):
+                summary_lines.append(line)
+                if len(summary_lines) >= 3:
+                    break
+
+        return '\n'.join(summary_lines) if summary_lines else "分析用户问题并生成查询计划"
+
+
+# ============ API端点 ============
+
+@app.on_event("startup")
+async def startup_event():
+    """启动时初始化Agent"""
+    global agent, settings
+
+    logger.info("初始化神策数据分析Agent...")
+    settings = get_settings()
+
+    try:
+        agent = create_agent_v2()
+        logger.info("Agent初始化完成")
+    except Exception as e:
+        logger.error(f"Agent初始化失败: {e}")
+        raise
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """关闭时清理资源"""
+    global agent
+
+    if agent:
+        logger.info("关闭Agent资源...")
+        agent.close()
+
+
+@app.get("/")
+async def root():
+    """健康检查"""
+    return {
+        "status": "ok",
+        "service": "神策数据分析助手 API",
+        "version": "2.0.0"
+    }
+
+
+@app.get("/v1/models")
+async def list_models():
+    """列出可用模型"""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "sensors-agent",
+                "object": "model",
+                "created": int(datetime.now().timestamp()),
+                "owned_by": "sensors-analytics"
+            }
+        ]
+    }
+
+
+@app.post("/v1/chat/completions")
+async def create_chat_completion(request: ChatCompletionRequest):
+    """
+    创建聊天补全
+
+    支持流式和非流式两种模式：
+    - 流式(stream=true): 实时返回thinking步骤和最终答案
+    - 非流式(stream=false): 返回最终完整答案
+    """
+    global agent
+
+    if not agent:
+        raise HTTPException(status_code=503, detail="Agent未初始化")
+
+    # 提取用户最后一条消息
+    user_messages = [msg for msg in request.messages if msg.role == "user"]
+    if not user_messages:
+        raise HTTPException(status_code=400, detail="未找到用户消息")
+
+    user_input = user_messages[-1].content
+
+    # 生成请求ID
+    request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    created_at = int(datetime.now().timestamp())
+
+    # 流式响应
+    if request.stream:
+        async def generate_stream():
+            """生成SSE流"""
+            wrapper = StreamingAgentWrapper(agent)
+
+            # 首先发送role
+            chunk = ChatCompletionStreamResponse(
+                id=request_id,
+                created=created_at,
+                model=request.model,
+                choices=[
+                    ChatCompletionStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(role="assistant"),
+                        finish_reason=None
+                    )
+                ]
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+
+            # 流式处理查询
+            async for step in wrapper.query_streaming(user_input):
+                step_type = step.get("type")
+                content = step.get("content", "")
+
+                if step_type == "thinking":
+                    # 发送thinking步骤
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        created=created_at,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionStreamChoice(
+                                index=0,
+                                delta=DeltaMessage(content=content),
+                                finish_reason=None
+                            )
+                        ]
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+                elif step_type == "answer":
+                    # 发送分隔符
+                    separator = "\n\n" + "=" * 60 + "\n\n"
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        created=created_at,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionStreamChoice(
+                                index=0,
+                                delta=DeltaMessage(content=separator),
+                                finish_reason=None
+                            )
+                        ]
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+                    # 发送最终答案
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        created=created_at,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionStreamChoice(
+                                index=0,
+                                delta=DeltaMessage(content=content),
+                                finish_reason=None
+                            )
+                        ]
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+                elif step_type == "error":
+                    # 发送错误信息
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        created=created_at,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionStreamChoice(
+                                index=0,
+                                delta=DeltaMessage(content=f"\n\n❌ 错误: {content}"),
+                                finish_reason="error"
+                            )
+                        ]
+                    )
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+            # 发送结束标记
+            chunk = ChatCompletionStreamResponse(
+                id=request_id,
+                created=created_at,
+                model=request.model,
+                choices=[
+                    ChatCompletionStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(),
+                        finish_reason="stop"
+                    )
+                ]
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            generate_stream(),
+            media_type="text/event-stream"
+        )
+
+    # 非流式响应
+    else:
+        try:
+            # 同步调用Agent
+            result = agent.query(user_input)
+
+            response = ChatCompletionResponse(
+                id=request_id,
+                created=created_at,
+                model=request.model,
+                choices=[
+                    ChatCompletionChoice(
+                        index=0,
+                        message=Message(role="assistant", content=result),
+                        finish_reason="stop"
+                    )
+                ],
+                usage=Usage(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0
+                )
+            )
+
+            return response
+
+        except Exception as e:
+            logger.exception("查询处理失败")
+            raise HTTPException(status_code=500, detail=f"查询处理失败: {str(e)}")
+
+
+@app.post("/reset")
+async def reset_agent():
+    """重置Agent对话状态"""
+    global agent
+
+    if not agent:
+        raise HTTPException(status_code=503, detail="Agent未初始化")
+
+    agent.reset()
+    return {"status": "ok", "message": "Agent状态已重置"}
+
+
+# ============ 主函数 ============
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "api_server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        log_level="info"
+    )

@@ -79,16 +79,19 @@ result = sql_execution(
 
     output_type = "string"
 
-    def __init__(self, sensors_client):
+    def __init__(self, sensors_client, base_url: Optional[str] = None):
         """
         初始化SQL执行工具
 
         Args:
             sensors_client: 神策API客户端
+            base_url: API服务器的基础URL，用于生成下载链接（可选）
+                     例如: "http://localhost:8000" 或 "https://api.example.com"
         """
         super().__init__()
         self.client = sensors_client
         self.settings = get_settings()
+        self.base_url = base_url
 
         # 设置默认输出目录
         self.default_output_dir = self.settings.SQL_OUTPUT_DIR if hasattr(self.settings, 'SQL_OUTPUT_DIR') else "/tmp/sensors_data"
@@ -97,6 +100,8 @@ result = sql_execution(
         self._ensure_output_dir(self.default_output_dir)
 
         logger.info(f"SQLExecutionTool 初始化完成，输出目录: {self.default_output_dir}")
+        if self.base_url:
+            logger.info(f"文件下载URL基础: {self.base_url}")
 
     def _ensure_output_dir(self, directory: str):
         """确保输出目录存在"""
@@ -255,25 +260,41 @@ result = sql_execution(
         lines.append("=" * 60)
         lines.append("")
 
-        # CSV文件信息
-        lines.append(f"✅ CSV 文件: {csv_path}")
+        # CSV文件信息 - 生成可点击的下载链接
+        csv_filename = os.path.basename(csv_path)
+
+        # 如果配置了base_url，生成HTTP下载链接
+        if self.base_url:
+            download_url = f"{self.base_url.rstrip('/')}/files/{csv_filename}"
+            lines.append(f"✅ CSV 文件: [{csv_filename}]({download_url})")
+            lines.append(f"📥 下载链接: {download_url}")
+        else:
+            # 否则使用本地文件路径
+            lines.append(f"✅ CSV 文件: [{csv_filename}]({csv_path})")
+            lines.append(f"📁 本地路径: {csv_path}")
+
         lines.append(f"📊 行数: {len(df)}")
         lines.append(f"📋 列: {list(df.columns)}")
         lines.append("")
 
-        # 数据预览（前10行）
+        # 数据输出（最多显示50行）
         if len(df) > 0:
-            lines.append("数据预览（前10行）:")
+            max_display_rows = 50
+            display_df = df.head(max_display_rows)
+
+            lines.append("## 完整数据")
             lines.append("-" * 60)
 
-            # 格式化显示前10行
-            preview_df = df.head(10)
-            preview_str = preview_df.to_string(index=False)
-            lines.append(preview_str)
+            # 格式化显示数据
+            full_data_str = display_df.to_string(index=False)
+            lines.append(full_data_str)
 
-            if len(df) > 10:
-                lines.append("")
-                lines.append(f"... 还有 {len(df) - 10} 行未显示")
+            lines.append("")
+            if len(df) > max_display_rows:
+                lines.append(f"⚠️ 仅显示前 {max_display_rows} 行，完整数据请查看CSV文件")
+                lines.append(f"✅ 总共 {len(df)} 行数据")
+            else:
+                lines.append(f"✅ 共 {len(df)} 行数据")
         else:
             lines.append("⚠️ 查询结果为空")
 

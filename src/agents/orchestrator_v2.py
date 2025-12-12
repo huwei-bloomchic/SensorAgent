@@ -35,7 +35,8 @@ class SensorsAnalyticsAgentV2:
         sensors_client: Optional[SensorsClient] = None,
         analyst_model_name: Optional[str] = None,
         engineer_model_name: Optional[str] = None,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None
     ):
         """
         初始化双层Agent架构
@@ -45,8 +46,10 @@ class SensorsAnalyticsAgentV2:
             analyst_model_name: 上层Agent模型名称(可选)
             engineer_model_name: 下层Agent模型名称(可选)
             api_key: API密钥(可选)
+            base_url: API服务器基础URL，用于生成CSV下载链接(可选)
         """
         self.settings = get_settings()
+        self.base_url = base_url
 
         # 初始化神策客户端
         if sensors_client is None:
@@ -65,7 +68,8 @@ class SensorsAnalyticsAgentV2:
         self.engineer_agent = EngineerAgent(
             sensors_client=sensors_client,
             model_name=engineer_model_name or self.settings.LITELLM_MODEL,
-            api_key=api_key or self.settings.LITELLM_API_KEY
+            api_key=api_key or self.settings.LITELLM_API_KEY,
+            base_url=base_url
         )
 
         logger.info("=" * 80)
@@ -640,7 +644,8 @@ class SensorsAnalyticsAgentV2:
 def create_agent_v2(
     analyst_model_name: Optional[str] = None,
     engineer_model_name: Optional[str] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None
 ) -> SensorsAnalyticsAgentV2:
     """
     工厂函数: 创建双层架构的神策分析Agent
@@ -649,6 +654,7 @@ def create_agent_v2(
         analyst_model_name: 上层Agent模型名称
         engineer_model_name: 下层Agent模型名称
         api_key: API密钥
+        base_url: API服务器基础URL，用于生成CSV下载链接
 
     Returns:
         SensorsAnalyticsAgentV2实例
@@ -656,5 +662,6 @@ def create_agent_v2(
     return SensorsAnalyticsAgentV2(
         analyst_model_name=analyst_model_name,
         engineer_model_name=engineer_model_name,
-        api_key=api_key
+        api_key=api_key,
+        base_url=base_url
     )

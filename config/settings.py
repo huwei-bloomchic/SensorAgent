@@ -137,6 +137,10 @@ class Settings(BaseSettings):
         gt=0,
         description="速率限制（每分钟最大请求数）"
     )
+    API_BASE_URL: str = Field(
+        default="http://localhost:8000",
+        description="API服务器基础URL，用于生成CSV文件下载链接"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

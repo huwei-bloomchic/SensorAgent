@@ -39,7 +39,8 @@ class EngineerAgent:
         sensors_client: Optional[SensorsClient] = None,
         model: Optional[OpenAIServerModel] = None,
         model_name: Optional[str] = None,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None
     ):
         """
         初始化SQL执行Agent
@@ -49,8 +50,10 @@ class EngineerAgent:
             model: LLM模型实例(可选)
             model_name: 模型名称(可选)
             api_key: API密钥(可选)
+            base_url: API服务器基础URL，用于生成CSV下载链接(可选)
         """
         self.settings = get_settings()
+        self.base_url = base_url
 
         # 初始化神策客户端
         if sensors_client is None:
@@ -125,8 +128,8 @@ class EngineerAgent:
             # SQL生成专家工具
             SQLExpertTool(self.model),
 
-            # SQL执行工具
-            SQLExecutionTool(self.sensors_client),
+            # SQL执行工具，传入base_url用于生成下载链接
+            SQLExecutionTool(self.sensors_client, base_url=self.base_url),
         ]
 
         logger.info(f"已加载 {len(tools)} 个工具")

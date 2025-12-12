@@ -16,10 +16,11 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from loguru import logger
+import os
 
 from config.settings import get_settings
 from src.agents.orchestrator_v2 import create_agent_v2
@@ -375,7 +376,11 @@ async def startup_event():
     settings = get_settings()
 
     try:
-        agent = create_agent_v2()
+        # 从环境变量获取base_url，或使用默认值
+        base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
+        logger.info(f"API Base URL: {base_url}")
+
+        agent = create_agent_v2(base_url=base_url)
         logger.info("Agent初始化完成")
     except Exception as e:
         logger.error(f"Agent初始化失败: {e}")
@@ -595,6 +600,113 @@ async def reset_agent():
 
     agent.reset()
     return {"status": "ok", "message": "Agent状态已重置"}
+
+
+@app.get("/files/{filename}")
+async def download_file(filename: str):
+    """
+    下载CSV文件
+
+    Args:
+        filename: CSV文件名
+
+    Returns:
+        文件下载响应
+
+    Example:
+        GET /files/refund_events_cdp_tag_fill_rate.csv
+    """
+    global settings
+
+    # 获取配置的CSV输出目录
+    csv_dir = settings.SQL_OUTPUT_DIR if settings else "/tmp/sensors_data"
+
+    # 构建完整文件路径
+    file_path = os.path.join(csv_dir, filename)
+
+    # 安全检查：确保文件路径在允许的目录内（防止路径遍历攻击）
+    csv_dir_abs = os.path.abspath(csv_dir)
+    file_path_abs = os.path.abspath(file_path)
+
+    if not file_path_abs.startswith(csv_dir_abs):
+        logger.warning(f"拒绝访问非法路径: {filename}")
+        raise HTTPException(status_code=403, detail="访问被拒绝")
+
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        logger.warning(f"文件不存在: {file_path}")
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    # 检查是否为CSV文件
+    if not filename.lower().endswith('.csv'):
+        logger.warning(f"非CSV文件访问请求: {filename}")
+        raise HTTPException(status_code=400, detail="只支持下载CSV文件")
+
+    logger.info(f"提供文件下载: {filename}")
+
+    # 返回文件响应
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Cache-Control": "no-cache"
+        }
+    )
+
+
+@app.get("/files")
+async def list_files():
+    """
+    列出所有可用的CSV文件
+
+    Returns:
+        文件列表，包含文件名、大小、修改时间等信息
+
+    Example:
+        GET /files
+    """
+    global settings
+
+    csv_dir = settings.SQL_OUTPUT_DIR if settings else "/tmp/sensors_data"
+
+    # 检查目录是否存在
+    if not os.path.exists(csv_dir):
+        return {"files": [], "message": "输出目录不存在"}
+
+    try:
+        files_info = []
+
+        for filename in os.listdir(csv_dir):
+            if not filename.endswith('.csv'):
+                continue
+
+            file_path = os.path.join(csv_dir, filename)
+
+            # 获取文件信息
+            stat = os.stat(file_path)
+
+            files_info.append({
+                "filename": filename,
+                "size_bytes": stat.st_size,
+                "size_human": f"{stat.st_size / 1024:.2f} KB",
+                "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "download_url": f"/files/{filename}"
+            })
+
+        # 按修改时间倒序排序
+        files_info.sort(key=lambda x: x["modified_time"], reverse=True)
+
+        return {
+            "files": files_info,
+            "total_count": len(files_info),
+            "directory": csv_dir
+        }
+
+    except Exception as e:
+        logger.error(f"列出文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"列出文件失败: {str(e)}")
 
 
 # ============ 主函数 ============

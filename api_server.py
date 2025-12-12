@@ -392,9 +392,10 @@ class StreamingAgentWrapper:
                 }
                 await asyncio.sleep(0)
 
+                from src.utils.report_formatter import ReportFormatter
                 final_answer = await loop.run_in_executor(
                     None,
-                    self.agent._format_single_result_to_markdown,
+                    ReportFormatter.format_single_result,
                     user_input,
                     all_results[0]
                 )
@@ -406,15 +407,18 @@ class StreamingAgentWrapper:
                 await asyncio.sleep(0)
 
                 def generate_final():
+                    from src.utils.report_formatter import ReportFormatter
                     synthesis_report = self.agent.analyst_agent.synthesize_results(
                         instructions=all_instructions,
                         results=all_results
                     )
-                    return self.agent._format_final_output(
+                    return ReportFormatter.format_multiple_results(
+                        user_question=user_input,
                         analysis_plan=analysis_plan,
                         initial_results=initial_results,
                         drilldown_results=drilldown_results,
-                        synthesis_report=synthesis_report
+                        synthesis_report=synthesis_report,
+                        extract_plan_summary=self.agent._extract_plan_summary
                     )
 
                 final_answer = await loop.run_in_executor(None, generate_final)

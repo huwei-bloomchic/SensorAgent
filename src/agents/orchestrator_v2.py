@@ -12,6 +12,8 @@ from config.settings import get_settings
 from src.sensors.client import SensorsClient
 from src.agents.analyst_agent import AnalystAgent
 from src.agents.engineer_agent import EngineerAgent
+from src.models.task_context import TaskContext
+from src.utils.report_formatter import ReportFormatter
 
 
 class SensorsAnalyticsAgentV2:
@@ -92,7 +94,13 @@ class SensorsAnalyticsAgentV2:
 
         return client
 
-    def query(self, user_input: str, enable_progressive_analysis: bool = True, task_id: Optional[str] = None) -> str:
+    def query(
+        self,
+        user_input: str,
+        enable_progressive_analysis: bool = True,
+        task_id: Optional[str] = None,
+        task_context: Optional[TaskContext] = None
+    ) -> str:
         """
         处理用户查询 - 渐进式双层架构协作流程
 
@@ -107,6 +115,7 @@ class SensorsAnalyticsAgentV2:
             user_input: 用户输入的自然语言查询
             enable_progressive_analysis: 是否启用渐进式分析 (默认True)
             task_id: 任务ID，用于CSV文件命名 (可选)
+            task_context: 任务上下文，如果提供则使用，否则创建新的 (可选)
 
         Returns:
             分析结果和洞察
@@ -115,9 +124,19 @@ class SensorsAnalyticsAgentV2:
         import uuid
         if not task_id:
             task_id = uuid.uuid4().hex[:8]
+
+        # 创建或使用提供的TaskContext
+        if task_context is None:
+            task_context = TaskContext(
+                task_id=task_id,
+                user_question=user_input
+            )
+        self.task_context = task_context  # 保存为实例变量，方便其他方法访问
+
         logger.info("=" * 80)
         logger.info(f"[Orchestrator V2] 开始处理查询: {user_input}")
         logger.info(f"[渐进式分析] {'启用' if enable_progressive_analysis else '禁用'}")
+        logger.info(f"[TaskContext] 任务ID: {task_id}")
         logger.info("=" * 80)
 
         try:
@@ -125,6 +144,13 @@ class SensorsAnalyticsAgentV2:
             logger.info("\n" + "=" * 80)
             logger.info("【阶段1】上层分析Agent - 生成初步查询")
             logger.info("=" * 80)
+
+            # 开始初始迭代
+            task_context.start_iteration(
+                iteration_type="initial",
+                name="初步查询",
+                description="根据用户问题生成初步查询计划"
+            )
 
             analysis_result = self.analyst_agent.analyze(user_input, stage="initial")
             analysis_plan = analysis_result.get("analysis_plan", "")
@@ -151,11 +177,18 @@ class SensorsAnalyticsAgentV2:
             logger.info("【阶段2】下层执行Agent - 执行初步查询")
             logger.info("=" * 80)
 
-            initial_results = self._execute_instructions(initial_instructions, task_id=task_id)
+            initial_results = self._execute_instructions(
+                initial_instructions,
+                task_id=task_id,
+                task_context=task_context
+            )
 
             # 检查初步查询是否成功
             success_count = sum(1 for r in initial_results if r.get("status") == "success")
             logger.info(f"\n初步查询完成: {success_count}/{len(initial_results)} 成功")
+
+            # 完成初始迭代
+            task_context.complete_iteration()
 
             # ============ 阶段3: 评估是否需要下钻 ============
             drilldown_results = []
@@ -180,6 +213,13 @@ class SensorsAnalyticsAgentV2:
                     logger.info("【阶段4】生成并执行下钻查询")
                     logger.info("=" * 80)
 
+                    # 开始下钻迭代
+                    task_context.start_iteration(
+                        iteration_type="drilldown",
+                        name="深入分析",
+                        description="基于初步结果进行深入分析"
+                    )
+
                     # 准备上下文信息
                     context = {
                         "initial_results": self.analyst_agent._extract_results_summary(initial_results),
@@ -200,8 +240,15 @@ class SensorsAnalyticsAgentV2:
                         for i, inst in enumerate(drilldown_instructions, 1):
                             logger.info(f"  {i}. {inst.get('task', inst)}")
 
-                        # 执行下钻查询，传递task_id
-                        drilldown_results = self._execute_instructions(drilldown_instructions, task_id=task_id)
+                        # 执行下钻查询，传递task_id和task_context
+                        drilldown_results = self._execute_instructions(
+                            drilldown_instructions,
+                            task_id=task_id,
+                            task_context=task_context
+                        )
+
+                        # 完成下钻迭代
+                        task_context.complete_iteration()
 
                         drilldown_success = sum(1 for r in drilldown_results if r.get("status") == "success")
                         logger.info(f"\n下钻查询完成: {drilldown_success}/{len(drilldown_results)} 成功")
@@ -219,10 +266,13 @@ class SensorsAnalyticsAgentV2:
             all_results = initial_results + drilldown_results
             all_instructions = initial_instructions + drilldown_instructions
 
+            # 标记任务完成
+            task_context.completed_at = datetime.now()
+
             # 如果只有一个初步查询且成功，且不需要下钻，转换为Markdown格式返回
             if len(all_results) == 1 and all_results[0].get("status") == "success" and not drilldown_results:
                 logger.info("单一查询成功且不需要下钻，转换为Markdown格式")
-                final_result = self._format_single_result_to_markdown(
+                final_result = ReportFormatter.format_single_result(
                     user_question=user_input,
                     result=all_results[0]
                 )
@@ -244,11 +294,13 @@ class SensorsAnalyticsAgentV2:
             logger.info("=" * 80)
 
             # 构建最终输出
-            return self._format_final_output(
+            return ReportFormatter.format_multiple_results(
+                user_question=user_input,
                 analysis_plan=analysis_plan,
                 initial_results=initial_results,
                 drilldown_results=drilldown_results,
-                synthesis_report=synthesis_report
+                synthesis_report=synthesis_report,
+                extract_plan_summary=self._extract_plan_summary
             )
 
         except Exception as e:
@@ -348,13 +400,19 @@ class SensorsAnalyticsAgentV2:
 
         return '\n'.join(summary_lines) if summary_lines else "自动分析"
 
-    def _execute_instructions(self, instructions: list, task_id: Optional[str] = None) -> list:
+    def _execute_instructions(
+        self,
+        instructions: list,
+        task_id: Optional[str] = None,
+        task_context: Optional[TaskContext] = None
+    ) -> list:
         """
-        执行一组指令，支持查询去重和缓存
+        执行一组指令，支持查询去重和缓存，并记录到TaskContext
 
         Args:
             instructions: 指令列表
             task_id: 任务ID，用于CSV文件命名 (可选)
+            task_context: 任务上下文，用于记录中间数据 (可选)
 
         Returns:
             执行结果列表
@@ -369,17 +427,30 @@ class SensorsAnalyticsAgentV2:
             # 将指令转换为字符串(如果是字典)
             if isinstance(instruction, dict):
                 instruction_str = instruction.get("task", json.dumps(instruction, ensure_ascii=False))
+                instruction_params = instruction
             else:
                 instruction_str = str(instruction)
+                instruction_params = {}
 
             # 生成指令的唯一标识
             instruction_hash = self._generate_instruction_hash(instruction_str)
+
+            # 在TaskContext中创建查询记录
+            query_ctx = None
+            if task_context and task_context.current_iteration:
+                query_ctx = task_context.create_query(
+                    instruction=instruction_str,
+                    context=None,
+                    parameters=instruction_params
+                )
 
             # 检查是否已经执行过相同的指令
             if instruction_hash in query_cache:
                 logger.info(f"⚡ 检测到重复指令，使用缓存结果 (hash: {instruction_hash[:8]}...)")
                 result = query_cache[instruction_hash].copy()
                 result["from_cache"] = True  # 标记为缓存结果
+                if query_ctx:
+                    query_ctx.from_cache = True
                 deduplicated_count += 1
             else:
                 # 调用下层Agent执行，传递task_id
@@ -391,6 +462,10 @@ class SensorsAnalyticsAgentV2:
                 )
                 result["query_hash"] = instruction_hash  # 添加查询标识
                 result["instruction"] = instruction_str  # 记录原始指令
+
+                # 将结果记录到TaskContext
+                if query_ctx:
+                    self._record_result_to_context(query_ctx, result)
 
                 # 缓存成功的查询结果
                 if result.get("status") == "success":
@@ -414,228 +489,60 @@ class SensorsAnalyticsAgentV2:
 
         return execution_results
 
-    def _format_single_result_to_markdown(
-        self,
-        user_question: str,
-        result: Dict[str, Any]
-    ) -> str:
+    def _record_result_to_context(self, query_ctx: Any, result: Dict[str, Any]):
         """
-        将单个查询结果转换为Markdown格式
+        将查询结果记录到TaskContext
 
         Args:
-            user_question: 用户原始问题
-            result: 查询结果 (包含JSON格式的result字段)
-
-        Returns:
-            Markdown格式的报告
+            query_ctx: QueryContext对象
+            result: 查询结果字典
         """
-        import json
-
-        # 解析result字段中的JSON数据
-        result_data = result.get("result", "")
-
         try:
-            # 尝试解析JSON
+            # 解析result中的JSON数据
+            result_data = result.get("result", "")
             if isinstance(result_data, str):
-                data = json.loads(result_data)
-            else:
-                data = result_data
+                import json
+                try:
+                    result_data = json.loads(result_data)
+                except:
+                    pass
 
-            # 构建Markdown报告
-            lines = []
-            lines.append("# 数据分析结果")
-            lines.append("")
-            lines.append(f"**查询问题:** {user_question}")
-            lines.append("")
-            lines.append("---")
-            lines.append("")
+            # 记录SQL
+            if isinstance(result_data, dict):
+                sql = result_data.get("sql_executed") or result_data.get("sql")
+                if sql:
+                    query_ctx.set_sql(sql)
+                    query_ctx.mark_sql_executed()
 
-            # 添加核心指标
-            lines.append("## 核心指标")
-            lines.append("")
+                # 记录CSV数据
+                csv_path = result_data.get("csv_path")
+                if csv_path:
+                    query_ctx.set_data(
+                        csv_path=csv_path,
+                        row_count=result_data.get("rows", 0),
+                        column_count=result_data.get("column_count"),
+                        columns=result_data.get("columns"),
+                        data_preview=result_data.get("data_preview", []),
+                        download_url=result_data.get("download_url")
+                    )
 
-            # 从query_info中提取信息
-            query_info = data.get("query_info", {})
-            if query_info:
-                if "date_range" in query_info:
-                    lines.append(f"- **查询时间范围:** {query_info['date_range']}")
+            # 记录状态
+            status = result.get("status", "unknown")
+            error = result.get("error")
+            query_ctx.complete(status=status, error=error)
 
-                if "total_records" in query_info:
-                    lines.append(f"- **总记录数:** {query_info['total_records']:,}")
-
-                if "events_analyzed" in query_info:
-                    events = query_info["events_analyzed"]
-                    if isinstance(events, list):
-                        lines.append(f"- **分析事件:** {', '.join(events)}")
-                    else:
-                        lines.append(f"- **分析事件:** {events}")
-
-                lines.append("")
-
-            # 添加数据预览
-            data_preview = data.get("data_preview", {})
-            if data_preview:
-                lines.append("## 数据预览")
-                lines.append("")
-
-                # 遍历事件
-                for event_name, event_data in data_preview.items():
-                    lines.append(f"### {event_name}")
-                    lines.append("")
-
-                    # 如果事件数据是字典（可能包含平台分组）
-                    if isinstance(event_data, dict):
-                        # 检查是否有平台分组
-                        first_value = next(iter(event_data.values())) if event_data else None
-
-                        if isinstance(first_value, dict) and 'total' in first_value:
-                            # 有平台分组
-                            lines.append("| 平台 | 总记录数 | 填充率 |")
-                            lines.append("|------|----------|--------|")
-
-                            for platform, metrics in event_data.items():
-                                total = metrics.get('total', '-')
-                                # 提取填充率（可能有多个填充率字段）
-                                fill_rates = []
-                                for key, value in metrics.items():
-                                    if 'fill_rate' in key or '填充率' in key:
-                                        fill_rates.append(value)
-
-                                fill_rate_str = ', '.join(fill_rates) if fill_rates else '-'
-                                lines.append(f"| {platform} | {total:,} | {fill_rate_str} |")
-                        else:
-                            # 没有平台分组，直接显示指标
-                            for key, value in event_data.items():
-                                lines.append(f"- **{key}:** {value}")
-
-                    lines.append("")
-
-            # 添加关键发现
-            key_findings = data.get("key_findings", [])
-            if key_findings:
-                lines.append("## 关键发现")
-                lines.append("")
-                for finding in key_findings:
-                    lines.append(f"- {finding}")
-                lines.append("")
-
-            # 添加完整数据文件信息
-            lines.append("## 完整数据")
-            lines.append("")
-
-            # 添加下载链接
-            if "download_url" in data:
-                csv_filename = data.get('csv_path', '').split('/')[-1]
-                download_url = data.get('download_url')
-                lines.append(f"- **CSV文件:** [{csv_filename}]({download_url})")
-            else:
-                lines.append(f"- **CSV文件路径:** `{data.get('csv_path', 'N/A')}`")
-
-            lines.append(f"- **数据行数:** {data.get('rows', 'N/A'):,}")
-            lines.append(f"- **数据列:** {', '.join(data.get('columns', []))}")
-            lines.append("")
-
-            # 添加执行的SQL
-            if "sql_executed" in data:
-                lines.append("## 执行的SQL")
-                lines.append("")
-                lines.append("```sql")
-                lines.append(data["sql_executed"])
-                lines.append("```")
-                lines.append("")
-
-            lines.append("---")
-            lines.append("")
-            lines.append(f"*生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
-
-            return "\n".join(lines)
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"无法解析JSON结果: {e}")
-            # 如果JSON解析失败，返回原始结果
-            return f"# 查询结果\n\n```json\n{result_data}\n```"
         except Exception as e:
-            logger.error(f"格式化结果失败: {e}", exc_info=True)
-            return f"# 查询结果\n\n格式化失败: {str(e)}\n\n```\n{result_data}\n```"
+            logger.warning(f"记录结果到上下文失败: {e}")
 
-    def _format_final_output(
-        self,
-        analysis_plan: str,
-        initial_results: list,
-        drilldown_results: list,
-        synthesis_report: str
-    ) -> str:
+    def get_task_context(self) -> Optional[TaskContext]:
         """
-        格式化最终输出报告（Markdown格式）
-
-        Args:
-            analysis_plan: 分析计划
-            initial_results: 初步查询结果
-            drilldown_results: 下钻查询结果
-            synthesis_report: 综合分析报告（已经是Markdown格式）
+        获取当前任务的TaskContext
 
         Returns:
-            Markdown格式的完整报告
+            TaskContext对象，如果不存在则返回None
         """
-        # 如果综合报告已经是完整的Markdown格式，直接返回
-        # （因为analyst_agent的synthesize_results已经生成了完整的Markdown报告）
-        if synthesis_report.strip().startswith("#"):
-            return synthesis_report
+        return getattr(self, 'task_context', None)
 
-        # 如果不是Markdown格式，使用传统格式作为后备
-        output_lines = []
-        output_lines.append("# 神策数据分析报告")
-        output_lines.append("")
-        output_lines.append("> **分析方法:** 渐进式双层智能分析")
-        output_lines.append("")
-        output_lines.append("---")
-        output_lines.append("")
-
-        # 添加分析方法摘要
-        output_lines.append("## 分析方法")
-        output_lines.append("")
-        output_lines.append(self._extract_plan_summary(analysis_plan))
-        output_lines.append("")
-
-        # 添加初步查询结果
-        output_lines.append("## 初步查询结果")
-        output_lines.append("")
-        for i, result in enumerate(initial_results, 1):
-            if result.get("status") == "success":
-                output_lines.append(f"### 查询 {i}")
-                output_lines.append("")
-                output_lines.append(str(result.get("result", "")))
-                output_lines.append("")
-            else:
-                output_lines.append(f"### 查询 {i} ❌")
-                output_lines.append("")
-                output_lines.append(f"**错误:** {result.get('error')}")
-                output_lines.append("")
-
-        # 如果有下钻查询，添加下钻结果
-        if drilldown_results:
-            output_lines.append("## 深入分析结果")
-            output_lines.append("")
-            for i, result in enumerate(drilldown_results, 1):
-                if result.get("status") == "success":
-                    output_lines.append(f"### 深入查询 {i}")
-                    output_lines.append("")
-                    output_lines.append(str(result.get("result", "")))
-                    output_lines.append("")
-                else:
-                    output_lines.append(f"### 深入查询 {i} ❌")
-                    output_lines.append("")
-                    output_lines.append(f"**错误:** {result.get('error')}")
-                    output_lines.append("")
-
-        # 添加综合分析
-        output_lines.append("## 业务洞察与建议")
-        output_lines.append("")
-        output_lines.append(synthesis_report)
-        output_lines.append("")
-        output_lines.append("---")
-
-        return "\n".join(output_lines)
 
     def reset(self):
         """重置对话状态"""

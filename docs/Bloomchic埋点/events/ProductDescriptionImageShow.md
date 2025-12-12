@@ -1,0 +1,18 @@
+# ProductDescriptionImageShow
+
+## 基本信息
+
+- **事件显示名**: 商品详情描述图片曝光
+- **事件英文名**: `ProductDescriptionImageShow`
+- **所属模块**: 3.【商详页】的埋点
+- **应埋点平台**: Android,Web,IOS
+
+## 事件属性
+
+| 属性英文名 | 属性显示名 | 数据类型 | 属性值示例或说明 | 应埋点平台 | 触发时机 | 备注 | 日期 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `index` | 序号, 从1开始 |  | 商品详情描述图片曝光 |  |  |  |  |
+| `type` | 资源类型： video | image |  |  |  |  |  |  |
+| `media_url` | 资源url |  |  |  |  |  |  |
+| `ad_pos_percent` | 屏占比 |  |  |  |  |  |  |
+| `product_id` | 其他商品参数跟 ProductPageShow 一致 |  |  |  |  |  |  |

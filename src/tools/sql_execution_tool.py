@@ -215,6 +215,18 @@ result = sql_execution(
             logger.error(f"数据结构: columns={columns}, rows={rows[:5] if rows else []}")
             raise ValueError(f"数据格式错误，无法创建DataFrame: {str(e)}")
 
+    def _safe_int(self, value: Any) -> Optional[int]:
+        """
+        尝试将值转换为int，无法转换则返回None，避免字符串导致崩溃。
+        """
+        try:
+            return int(value)
+        except Exception:
+            try:
+                return int(float(value))
+            except Exception:
+                return None
+
     def _save_csv(self, df: pd.DataFrame, output_path: str) -> str:
         """
         保存DataFrame为CSV文件
@@ -358,7 +370,7 @@ result = sql_execution(
                             # 提取关键指标
                             preview_item = {}
                             if '总记录数' in platform_data.columns:
-                                preview_item['total'] = int(platform_data['总记录数'].iloc[0])
+                                preview_item['total'] = self._safe_int(platform_data['总记录数'].iloc[0])
 
                             # 提取填充率信息
                             for col in platform_data.columns:
@@ -375,7 +387,7 @@ result = sql_execution(
                         preview_item = {}
 
                         if '总记录数' in event_data.columns:
-                            preview_item['total'] = int(event_data['总记录数'].iloc[0])
+                            preview_item['total'] = self._safe_int(event_data['总记录数'].iloc[0])
 
                         for col in event_data.columns:
                             if '填充率' in col:

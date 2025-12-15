@@ -287,18 +287,6 @@ class SensorsAnalyticsAgentV2:
             # 标记任务完成
             task_context.completed_at = datetime.now()
 
-            # 如果只有一个初步查询且成功，且不需要下钻，转换为Markdown格式返回
-            if len(all_results) == 1 and all_results[0].get("status") == "success" and not drilldown_results:
-                logger.info("单一查询成功且不需要下钻，转换为Markdown格式")
-                final_result = ReportFormatter.format_single_result(
-                    user_question=user_input,
-                    result=all_results[0]
-                )
-                logger.info("=" * 80)
-                logger.info("[Orchestrator V2] 查询处理完成")
-                logger.info("=" * 80)
-                return final_result
-
             # 需要综合分析
             logger.info("开始综合多个查询结果...")
             synthesis_report = self.analyst_agent.synthesize_results(
@@ -536,14 +524,9 @@ class SensorsAnalyticsAgentV2:
                 }
                 
             except Exception as e:
-                error_msg = str(e)
-                logger.error(f"执行指令失败: {error_msg}", exc_info=True)
-                result = {
-                    "status": "error",
-                    "instruction": instruction_str,
-                    "error": error_msg,
-                    "timestamp": datetime.now().isoformat()
-                }
+                # 工具失败时直接抛出，避免继续执行后续指令
+                logger.error(f"执行指令失败: {e}", exc_info=True)
+                raise
             
             result["query_hash"] = instruction_hash
 
@@ -588,15 +571,10 @@ class SensorsAnalyticsAgentV2:
                     else:
                         logger.error(f"❌ 指令 {index+1}/{len(instructions)} 执行失败: {result.get('error')} [{completed_count}/{len(instructions)}]")
                 except Exception as e:
-                    # 处理执行异常
                     task = future_to_task[future]
                     logger.exception(f"❌ 指令 {task['index']+1} 执行异常: {e}")
-                    execution_results[task["index"]] = {
-                        "status": "error",
-                        "instruction": task["instruction_str"],
-                        "error": str(e),
-                        "timestamp": datetime.now().isoformat()
-                    }
+                    # 失败即抛出，让上层感知错误
+                    raise
 
         # 记录去重统计
         if deduplicated_count[0] > 0:

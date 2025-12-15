@@ -20,6 +20,7 @@ from src.sensors.client import SensorsClient
 from src.tools.event_schema_tool import EventSchemaTool
 from src.tools.sql_expert_tool import SQLExpertTool
 from src.tools.sql_execution_tool import SQLExecutionTool
+from src.tools.auto_sql_query_tool import AutoSQLQueryTool
 
 
 class EngineerAgent:
@@ -121,15 +122,15 @@ class EngineerAgent:
             api_base=self.settings.LITELLM_BASE_URL,
         )
 
+        # 使用统一的AutoSQLQueryTool替代原来的三个工具
+        # 该工具会自动完成：Schema检索 -> SQL生成 -> SQL执行 -> 语法错误重试
         tools = [
-            # 事件Schema检索工具
-            EventSchemaTool(event_schema_model),
-
-            # SQL生成专家工具
-            SQLExpertTool(self.model),
-
-            # SQL执行工具，传入base_url用于生成下载链接
-            SQLExecutionTool(self.sensors_client, base_url=self.base_url),
+            AutoSQLQueryTool(
+                sensors_client=self.sensors_client,
+                event_schema_model=event_schema_model,
+                sql_expert_model=self.model,
+                base_url=self.base_url
+            ),
         ]
 
         logger.info(f"已加载 {len(tools)} 个工具")

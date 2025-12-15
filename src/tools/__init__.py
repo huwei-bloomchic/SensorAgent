@@ -6,6 +6,7 @@ from src.tools.event_analysis_tool import EventAnalysisTool
 from src.tools.funnel_tool import FunnelTool
 from src.tools.retention_tool import RetentionTool
 from src.tools.sql_query_tool import SQLQueryTool
+from src.tools.auto_sql_query_tool import AutoSQLQueryTool
 
 __all__ = [
     # "BaseSensorsTool",
@@ -13,4 +14,5 @@ __all__ = [
     # "FunnelTool",
     # "RetentionTool",
     "SQLQueryTool",
+    "AutoSQLQueryTool",
 ]

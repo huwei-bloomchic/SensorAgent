@@ -226,6 +226,9 @@ class SensorsClient:
         """
         组合JSONL格式的响应数据
 
+        神策 API 在 GROUP BY 查询时，汇总行（总计行）可能比明细行少列，
+        因为分组字段为 NULL 时会被省略。需要收集所有列名，并对缺少列的行进行填充。
+
         Args:
             parsed_lines: 解析后的JSON行列表
 
@@ -242,11 +245,13 @@ class SensorsClient:
             "rows": []
         }
 
-        # 处理每一行
+        # 临时存储：每行的原始数据和对应的列名
+        raw_rows = []  # [(columns, data), ...]
+
+        # 第一遍：收集所有数据和列名
         for line in parsed_lines:
             # 检查是否有错误
             if "error" in line or "error_code" in line:
-                # 如果有错误，直接返回错误信息
                 return line
 
             # 检查code字段（神策v3 API）
@@ -257,21 +262,53 @@ class SensorsClient:
             # 神策v3 API格式: {"code": "SUCCESS", "data": {"data": [...], "columns": [...]}}
             if "data" in line and isinstance(line["data"], dict):
                 data_obj = line["data"]
+                line_columns = data_obj.get("columns", [])
+                line_data = data_obj.get("data", [])
 
-                # 提取columns（只在第一次提取）
-                if "columns" in data_obj and not result["columns"]:
-                    result["columns"] = data_obj["columns"]
-                    logger.debug(f"提取列名: {result['columns']}")
+                # 提取types（如果有，选择最完整的）
+                if "types" in data_obj:
+                    if not result["types"] or len(data_obj["types"]) > len(result["types"]):
+                        result["types"] = data_obj["types"]
 
-                # 提取types（如果有）
-                if "types" in data_obj and not result["types"]:
-                    result["types"] = data_obj["types"]
+                # 处理数据行
+                if line_data and isinstance(line_data, list):
+                    if line_data and isinstance(line_data[0], list):
+                        # 多行数据：[[val1, val2], [val3, val4], ...]
+                        for row in line_data:
+                            raw_rows.append((line_columns, row))
+                    else:
+                        # 单行数据：[val1, val2, ...]
+                        raw_rows.append((line_columns, line_data))
 
-                # 提取数据行
-                if "data" in data_obj:
-                    row_data = data_obj["data"]
-                    result["rows"].append(row_data)
-                    logger.debug(f"提取数据行: {row_data}")
+        if not raw_rows:
+            logger.warning("没有解析到任何数据行")
+            return result
+
+        # 第二遍：确定最完整的列集合（选择列数最多的）
+        all_columns_sets = [cols for cols, _ in raw_rows if cols]
+        if all_columns_sets:
+            # 选择列数最多的作为标准列
+            result["columns"] = max(all_columns_sets, key=len)
+            logger.debug(f"选择最完整的列名（{len(result['columns'])} 列）: {result['columns']}")
+
+        # 第三遍：对齐所有行的数据到标准列
+        final_columns = result["columns"]
+        for row_columns, row_data in raw_rows:
+            if len(row_columns) == len(final_columns):
+                # 列数一致，直接使用
+                result["rows"].append(row_data)
+            elif len(row_columns) < len(final_columns):
+                # 列数较少（如汇总行），需要根据列名映射填充 None
+                aligned_row = []
+                row_dict = dict(zip(row_columns, row_data))
+                for col in final_columns:
+                    aligned_row.append(row_dict.get(col, None))
+                result["rows"].append(aligned_row)
+                logger.debug(f"对齐行数据：原 {len(row_columns)} 列 -> {len(final_columns)} 列，填充 {len(final_columns) - len(row_columns)} 个 None")
+            else:
+                # 列数更多（理论上不应该发生），截断
+                logger.warning(f"行列数({len(row_columns)})超过标准列数({len(final_columns)})，截断处理")
+                result["rows"].append(row_data[:len(final_columns)])
 
         logger.debug(f"组合后的结果: {len(result['rows'])} 行数据, 列: {result['columns']}")
         return result

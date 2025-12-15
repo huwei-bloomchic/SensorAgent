@@ -349,79 +349,23 @@ result = sql_execution(
         if query_info:
             result_data["query_info"] = query_info
 
-        # 生成数据预览（分组展示）
-        data_preview = {}
-        if len(df) > 0:
-            # 检查是否有事件分组
-            if 'event' in df.columns or '事件名称' in df.columns:
-                event_col = 'event' if 'event' in df.columns else '事件名称'
-
-                # 按事件和平台分组
-                if 'web_platform_type' in df.columns or '平台类型' in df.columns:
-                    platform_col = 'web_platform_type' if 'web_platform_type' in df.columns else '平台类型'
-
-                    for event in df[event_col].unique():
-                        event_data = df[df[event_col] == event]
-                        event_preview = {}
-
-                        for platform in event_data[platform_col].unique():
-                            platform_data = event_data[event_data[platform_col] == platform]
-
-                            # 提取关键指标
-                            preview_item = {}
-                            if '总记录数' in platform_data.columns:
-                                preview_item['total'] = self._safe_int(platform_data['总记录数'].iloc[0])
-
-                            # 提取填充率信息
-                            for col in platform_data.columns:
-                                if '填充率' in col:
-                                    preview_item[col.replace('%', '')] = f"{platform_data[col].iloc[0]}%"
-
-                            event_preview[str(platform)] = preview_item
-
-                        data_preview[str(event)] = event_preview
-                else:
-                    # 只有事件分组，没有平台
-                    for event in df[event_col].unique():
-                        event_data = df[df[event_col] == event]
-                        preview_item = {}
-
-                        if '总记录数' in event_data.columns:
-                            preview_item['total'] = self._safe_int(event_data['总记录数'].iloc[0])
-
-                        for col in event_data.columns:
-                            if '填充率' in col:
-                                preview_item[col.replace('%', '')] = f"{event_data[col].iloc[0]}%"
-
-                        data_preview[str(event)] = preview_item
-
-        if data_preview:
-            result_data["data_preview"] = data_preview
-
-        # 生成关键发现
-        key_findings = []
-        if len(df) > 0:
-            # 根据数据特点自动生成关键发现
-            if 'event' in df.columns or '事件名称' in df.columns:
-                event_col = 'event' if 'event' in df.columns else '事件名称'
-                key_findings.append(f"📊 分析了 {df[event_col].nunique()} 个事件，共 {len(df)} 条记录")
-
-            # 检查填充率字段
-            fill_rate_cols = [col for col in df.columns if '填充率' in col]
-            if fill_rate_cols:
-                for col in fill_rate_cols:
-                    try:
-                        avg_rate = df[col].mean()
-                        key_findings.append(f"📈 {col}平均值: {avg_rate:.2f}%")
-                    except:
-                        pass
-
-        if key_findings:
-            result_data["key_findings"] = key_findings
-
         # 添加执行的SQL
         if sql:
             result_data["sql_executed"] = sql
+
+
+        # === 新增：前5行数据预览 ===
+        if len(df) > 0:
+            preview_count = min(5, len(df))
+            # 转换为字典列表，方便 LLM 理解数据结构和内容
+            head_records = df.head(preview_count).to_dict('records')
+            # 处理可能的 NaN 值，转换为 None
+            for record in head_records:
+                for key, value in record.items():
+                    if pd.isna(value):
+                        record[key] = None
+            result_data["head_preview"] = head_records
+            logger.info(f"已添加前 {preview_count} 行数据预览到返回结果")
 
         # 返回JSON字符串
         return json.dumps(result_data, ensure_ascii=False, indent=2)

@@ -219,24 +219,29 @@ async def create_chat_completion(request: ChatCompletionRequest):
                 
                 result = await loop.run_in_executor(None, run_query)
 
-                # 将结果分块发送（每100个字符一块，模拟流式输出）
-                chunk_size = 100
-                for i in range(0, len(result), chunk_size):
-                    chunk_content = result[i:i + chunk_size]
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        created=created_at,
-                        model=request.model,
-                        choices=[
-                            ChatCompletionStreamChoice(
-                                index=0,
-                                delta=DeltaMessage(content=chunk_content),
-                                finish_reason=None
-                            )
-                        ]
-                    )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
-                    await asyncio.sleep(0.01)  # 小延迟，模拟流式输出
+                # 确保result是字符串类型
+                if not isinstance(result, str):
+                    if isinstance(result, dict):
+                        # 如果是字典，转换为JSON字符串
+                        result = json.dumps(result, ensure_ascii=False, indent=2)
+                    else:
+                        # 其他类型直接转换为字符串
+                        result = str(result)
+
+                # 直接发送完整结果
+                chunk = ChatCompletionStreamResponse(
+                    id=request_id,
+                    created=created_at,
+                    model=request.model,
+                    choices=[
+                        ChatCompletionStreamChoice(
+                            index=0,
+                            delta=DeltaMessage(content=result),
+                            finish_reason=None
+                        )
+                    ]
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
 
             except Exception as e:
                 logger.exception("流式查询处理失败")

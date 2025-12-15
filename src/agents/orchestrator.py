@@ -145,7 +145,7 @@ class SensorsAnalyticsAgent:
             verbosity_level=2,  # 启用详细日志 (0=静默, 1=简要, 2=详细)
             additional_authorized_imports=[
                 "json", "datetime", "time",
-                "pandas", "matplotlib", "io", "base64",  # 新增数据分析库
+                "pandas", "matplotlib", "matplotlib.pyplot", "io", "base64",  # 新增数据分析库
                 "numpy", "csv"  # 新增辅助库
             ],
         )
@@ -181,7 +181,7 @@ class SensorsAnalyticsAgent:
 
         return f"""{current_time_info}
 
-你是神策数据分析助手，专门帮助用户分析神策Analytics平台的数据。
+你是大码品牌女装Bloomchic的神策数据分析助手，专门帮助用户分析神策Analytics平台的数据。
 
 你的能力：
 1. 自动SQL查询 - 使用 auto_sql_query 一次完成 Schema 检索、SQL生成与执行
@@ -297,6 +297,7 @@ print(f"<img src='data:image/png;base64,{{img_str}}' />")
 3. 【使用Python分析】- 用pandas进行所有数据分析，不要依赖预定义工具
 4. 【生成可视化】- 分析类问题一定要生成图表
 5. 【提供洞察】- 不仅要展示数据，还要给出业务洞察和建议
+6. 【禁止文件操作】- ❌ 禁止使用 open() 函数写入文件，所有结果必须通过 print() 输出
 
 工作流要点：
 - auto_sql_query 内部完成 Schema 检索、SQL 生成与执行
@@ -326,6 +327,9 @@ print(f"<img src='data:image/png;base64,{{img_str}}' />")
 ❌ 不要在任何情况下编造数据或数字
 ❌ 不要假设查询成功并继续分析
 ❌ 不要在没有真实数据的情况下给出分析结果
+❌ 禁止使用 open() 函数进行文件操作（包括读取和写入）
+❌ 禁止使用 with open() 语句
+✅ 所有分析结果必须通过 print() 函数输出，不要尝试写入文件
 
 请用专业但友好的语气与用户交流，提供有价值的数据洞察和行动建议。
 """

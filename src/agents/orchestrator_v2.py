@@ -1,6 +1,6 @@
 """
 Agent编排器 V2 - 双层架构
-主要的智能代理，协调上层分析Agent和下层SQL执行Agent
+主要的智能代理，协调上层分析Agent和AutoSQLQueryTool
 """
 from typing import Optional, Dict, Any
 from loguru import logger
@@ -13,25 +13,26 @@ import threading
 from config.settings import get_settings
 from src.sensors.client import SensorsClient
 from src.agents.analyst_agent import AnalystAgent
-from src.agents.engineer_agent import EngineerAgent
+from src.tools.auto_sql_query_tool import AutoSQLQueryTool
 from src.models.task_context import TaskContext
 from src.utils.report_formatter import ReportFormatter
+from smolagents.models import OpenAIServerModel
 
 
 class SensorsAnalyticsAgentV2:
     """
-    神策数据分析智能助手 V2 - 双层架构
+    神策数据分析智能助手 V2（分析 + SQL 工具双层协作）
 
     架构:
-    - 上层: AnalystAgent (分析规划) - 懂业务，不懂SQL
-    - 下层: EngineerAgent (SQL执行) - 懂SQL，不懂业务归因
-    - 协调: Orchestrator - 负责上下层通信和流程控制
+    - 上层: AnalystAgent（分析规划）负责业务理解与指令拆解
+    - 下层: AutoSQLQueryTool（SQL执行）自动完成 Schema 检索、SQL 生成与执行
+    - 协调: Orchestrator 负责路由与结果整合
 
-    功能:
-    - 理解用户自然语言查询
-    - 上层Agent生成分析计划
-    - 下层Agent执行SQL查询
-    - 上层Agent综合结果并生成洞察
+    核心流程:
+    1) AnalystAgent 将用户需求拆解为可执行的查询指令
+    2) AutoSQLQueryTool 执行指令：Schema 检索 -> SQL 生成 -> SQL 执行 -> CSV 输出
+    3) 去重与并发执行，缓存重复查询结果
+    4) 可选的渐进式下钻分析，合并多次查询结果生成洞察
     """
 
     def __init__(
@@ -48,7 +49,7 @@ class SensorsAnalyticsAgentV2:
         Args:
             sensors_client: 神策API客户端(可选)
             analyst_model_name: 上层Agent模型名称(可选)
-            engineer_model_name: 下层Agent模型名称(可选)
+            engineer_model_name: SQL生成使用的模型名称(可选)
             api_key: API密钥(可选)
             base_url: API服务器基础URL，用于生成CSV下载链接(可选)
         """
@@ -67,19 +68,34 @@ class SensorsAnalyticsAgentV2:
             api_key=api_key or self.settings.LITELLM_API_KEY
         )
 
-        # 初始化下层SQL执行Agent
-        logger.info("初始化下层SQL执行Agent (EngineerAgent)...")
-        self.engineer_agent = EngineerAgent(
-            sensors_client=sensors_client,
-            model_name=engineer_model_name or self.settings.LITELLM_MODEL,
+        # 初始化AutoSQLQueryTool（直接使用工具，不再通过EngineerAgent）
+        logger.info("初始化AutoSQLQueryTool...")
+        
+        # 为EventSchemaTool创建单独的轻量模型
+        event_schema_model = OpenAIServerModel(
+            model_id="gemini-2.5-flash-lite",
             api_key=api_key or self.settings.LITELLM_API_KEY,
+            api_base=self.settings.LITELLM_BASE_URL,
+        )
+        
+        # SQL生成使用的模型
+        sql_expert_model = OpenAIServerModel(
+            model_id=engineer_model_name or self.settings.LITELLM_MODEL,
+            api_key=api_key or self.settings.LITELLM_API_KEY,
+            api_base=self.settings.LITELLM_BASE_URL,
+        )
+        
+        self.auto_sql_query_tool = AutoSQLQueryTool(
+            sensors_client=sensors_client,
+            event_schema_model=event_schema_model,
+            sql_expert_model=sql_expert_model,
             base_url=base_url
         )
 
         logger.info("=" * 80)
         logger.info("双层Agent架构初始化完成")
         logger.info("  ├─ 上层: AnalystAgent (业务分析)")
-        logger.info("  └─ 下层: EngineerAgent (SQL执行)")
+        logger.info("  └─ 工具: AutoSQLQueryTool (SQL执行)")
         logger.info("=" * 80)
 
     def _create_sensors_client(self) -> SensorsClient:
@@ -485,13 +501,51 @@ class SensorsAnalyticsAgentV2:
 
             # 执行新指令（不在锁内执行，避免阻塞其他任务）
             logger.info(f"🔍 执行新指令 (hash: {instruction_hash[:8]}...)")
-            result = self.engineer_agent.execute_instruction(
-                instruction_str,
-                context=None,
-                task_id=task_id
-            )
+            
+            # 直接调用AutoSQLQueryTool
+            try:
+                # 从指令中提取日期范围和文件名
+                date_range = "last_7_days"  # 默认值
+                filename = None
+                
+                # 如果instruction_params包含日期范围，使用它
+                instruction_params = task_info.get("instruction_params", {})
+                if isinstance(instruction_params, dict):
+                    date_range = instruction_params.get("time_range", instruction_params.get("date_range", date_range))
+                
+                if task_id:
+                    filename = f"task_{task_id}_query_{i+1}.csv"
+                
+                # 调用AutoSQLQueryTool
+                tool_result = self.auto_sql_query_tool.forward(
+                    user_query=instruction_str,
+                    date_range=date_range,
+                    filename=filename
+                )
+                
+                # 解析工具返回的JSON字符串
+                import json
+                tool_data = json.loads(tool_result)
+                
+                # 转换为与EngineerAgent兼容的格式
+                result = {
+                    "status": "success",
+                    "instruction": instruction_str,
+                    "result": tool_result,  # 保留原始JSON字符串
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"执行指令失败: {error_msg}", exc_info=True)
+                result = {
+                    "status": "error",
+                    "instruction": instruction_str,
+                    "error": error_msg,
+                    "timestamp": datetime.now().isoformat()
+                }
+            
             result["query_hash"] = instruction_hash
-            result["instruction"] = instruction_str
 
             # 记录结果到TaskContext
             if query_ctx:
@@ -610,22 +664,16 @@ class SensorsAnalyticsAgentV2:
     def reset(self):
         """重置对话状态"""
         logger.info("重置双层Agent状态")
-        # 重新初始化两个Agent
+        # 重新初始化分析Agent和工具
         self.analyst_agent = AnalystAgent(
             model_name=self.settings.LITELLM_MODEL,
             api_key=self.settings.LITELLM_API_KEY
         )
-        self.engineer_agent = EngineerAgent(
-            sensors_client=self.sensors_client,
-            model_name=self.settings.LITELLM_MODEL,
-            api_key=self.settings.LITELLM_API_KEY
-        )
+        # AutoSQLQueryTool不需要重置，因为它本身是无状态的
 
     def close(self):
         """关闭资源"""
         logger.info("关闭双层Agent资源")
-        if self.engineer_agent:
-            self.engineer_agent.close()
         if self.sensors_client:
             self.sensors_client.close()
 

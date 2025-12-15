@@ -511,7 +511,7 @@ class StreamingAgentWrapper:
 
     async def _execute_engineer_streaming(self, instruction: str, task_id: Optional[str] = None):
         """
-        在异步上下文中流式执行 EngineerAgent 的指令
+        在异步上下文中执行 AutoSQLQueryTool（已废弃流式执行，改为直接调用）
 
         Args:
             instruction: 指令内容
@@ -525,52 +525,49 @@ class StreamingAgentWrapper:
 
         loop = asyncio.get_event_loop()
 
-        # 创建一个队列用于线程间通信
-        import queue
-        event_queue = queue.Queue()
-
-        def run_streaming():
-            """在线程中运行流式执行"""
+        def run_query():
+            """在线程中运行查询"""
             try:
-                for event in self.agent.engineer_agent.execute_instruction_streaming(
-                    instruction,
-                    context=None,
-                    task_id=task_id
-                ):
-                    event_queue.put(("event", event))
+                # 直接调用AutoSQLQueryTool
+                date_range = "last_7_days"
+                filename = f"task_{task_id}_query.csv" if task_id else None
+                
+                result = self.agent.auto_sql_query_tool.forward(
+                    user_query=instruction,
+                    date_range=date_range,
+                    filename=filename
+                )
+                
+                # 解析结果
+                import json
+                result_data = json.loads(result)
+                
+                return {
+                    "status": "success",
+                    "instruction": instruction,
+                    "result": result,
+                    "timestamp": datetime.now().isoformat()
+                }
             except Exception as e:
-                event_queue.put(("error", str(e)))
-            finally:
-                event_queue.put(("done", None))
+                return {
+                    "status": "error",
+                    "instruction": instruction,
+                    "error": str(e),
+                    "timestamp": datetime.now().isoformat()
+                }
 
-        # 在线程池中启动执行
+        # 在线程池中执行
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(run_streaming)
+        future = executor.submit(run_query)
 
-        # 持续从队列中读取事件
-        while True:
-            try:
-                # 非阻塞地检查队列
-                msg_type, data = await loop.run_in_executor(None, event_queue.get, True, 0.1)
-
-                if msg_type == "done":
-                    break
-                elif msg_type == "error":
-                    yield {
-                        "type": "result",
-                        "data": {
-                            "status": "error",
-                            "error": data,
-                            "timestamp": datetime.now().isoformat()
-                        }
-                    }
-                    break
-                elif msg_type == "event":
-                    yield data
-
-            except:
-                # 队列为空，继续等待
-                await asyncio.sleep(0.05)
+        # 等待结果
+        result = await loop.run_in_executor(None, future.result)
+        
+        # 返回结果
+        yield {
+            "type": "result",
+            "data": result
+        }
 
         executor.shutdown(wait=False)
 

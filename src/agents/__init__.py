@@ -5,7 +5,6 @@ Contains:
 - orchestrator.py: Original single-layer Agent (deprecated)
 - orchestrator_v2.py: Dual-layer architecture Agent (recommended)
 - analyst_agent.py: Upper-layer Analyst/Planner Agent
-- engineer_agent.py: Lower-layer SQL Execution Agent
 """
 
 # Export original single-layer architecture (for backward compatibility)
@@ -22,7 +21,6 @@ from src.agents.orchestrator_v2 import (
 
 # Export sub-agents
 from src.agents.analyst_agent import AnalystAgent
-from src.agents.engineer_agent import EngineerAgent
 
 __all__ = [
     # Original single-layer architecture
@@ -33,5 +31,4 @@ __all__ = [
     "SensorsAnalyticsAgentV2",
     "create_agent_v2",
     "AnalystAgent",
-    "EngineerAgent",
 ]

@@ -354,18 +354,17 @@ result = sql_execution(
             result_data["sql_executed"] = sql
 
 
-        # === 新增：前5行数据预览 ===
+        # === 新增：前30行数据预览（表格形式） ===
         if len(df) > 0:
-            preview_count = min(5, len(df))
-            # 转换为字典列表，方便 LLM 理解数据结构和内容
-            head_records = df.head(preview_count).to_dict('records')
-            # 处理可能的 NaN 值，转换为 None
-            for record in head_records:
-                for key, value in record.items():
-                    if pd.isna(value):
-                        record[key] = None
-            result_data["head_preview"] = head_records
-            logger.info(f"已添加前 {preview_count} 行数据预览到返回结果")
+            preview_count = min(30, len(df))
+            # 获取预览数据
+            preview_df = df.head(preview_count)
+            # 将NaN值替换为空字符串，以便在表格中显示
+            preview_df = preview_df.fillna('')
+            # 转换为简单表格字符串格式
+            table_str = preview_df.to_string(index=False)
+            result_data["head_preview"] = table_str
+            logger.info(f"已添加前 {preview_count} 行数据预览（表格形式）到返回结果")
 
         # 返回JSON字符串
         return json.dumps(result_data, ensure_ascii=False, indent=2)

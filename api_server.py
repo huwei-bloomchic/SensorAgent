@@ -215,6 +215,9 @@ async def create_chat_completion(request: ChatCompletionRequest):
             try:
                 # 在线程池中执行查询
                 def run_query():
+                    # 设置 matplotlib 使用非交互式后端，避免在后台线程中创建 GUI 窗口
+                    import matplotlib
+                    matplotlib.use('Agg')  # 使用非交互式后端
                     return agent.query(user_input)
                 
                 result = await loop.run_in_executor(None, run_query)
@@ -289,6 +292,9 @@ async def create_chat_completion(request: ChatCompletionRequest):
             
             # 使用lambda包装，因为run_in_executor不支持关键字参数
             def run_query():
+                # 设置 matplotlib 使用非交互式后端，避免在后台线程中创建 GUI 窗口
+                import matplotlib
+                matplotlib.use('Agg')  # 使用非交互式后端
                 return agent.query(user_input)
             
             result = await loop.run_in_executor(None, run_query)
@@ -333,30 +339,31 @@ async def reset_agent():
 @app.get("/files/{filename}")
 async def download_file(filename: str):
     """
-    下载CSV文件
+    下载或展示文件（支持CSV和图片文件）
 
     Args:
-        filename: CSV文件名
+        filename: 文件名（支持 .csv, .png, .jpg, .jpeg 等）
 
     Returns:
-        文件下载响应
+        文件响应（CSV文件下载，图片文件直接展示）
 
     Example:
         GET /files/refund_events_cdp_tag_fill_rate.csv
+        GET /files/chart_analysis.png
     """
     global settings
 
-    # 获取配置的CSV输出目录
-    csv_dir = settings.SQL_OUTPUT_DIR if settings else "/tmp/sensors_data"
+    # 获取配置的输出目录
+    output_dir = settings.SQL_OUTPUT_DIR if settings else "/tmp/sensors_data"
 
     # 构建完整文件路径
-    file_path = os.path.join(csv_dir, filename)
+    file_path = os.path.join(output_dir, filename)
 
     # 安全检查：确保文件路径在允许的目录内（防止路径遍历攻击）
-    csv_dir_abs = os.path.abspath(csv_dir)
+    output_dir_abs = os.path.abspath(output_dir)
     file_path_abs = os.path.abspath(file_path)
 
-    if not file_path_abs.startswith(csv_dir_abs):
+    if not file_path_abs.startswith(output_dir_abs):
         logger.warning(f"拒绝访问非法路径: {filename}")
         raise HTTPException(status_code=403, detail="访问被拒绝")
 
@@ -365,20 +372,38 @@ async def download_file(filename: str):
         logger.warning(f"文件不存在: {file_path}")
         raise HTTPException(status_code=404, detail="文件不存在")
 
-    # 检查是否为CSV文件
-    if not filename.lower().endswith('.csv'):
-        logger.warning(f"非CSV文件访问请求: {filename}")
-        raise HTTPException(status_code=400, detail="只支持下载CSV文件")
+    # 根据文件类型确定 media_type 和 Content-Disposition
+    filename_lower = filename.lower()
+    
+    if filename_lower.endswith('.csv'):
+        media_type = "text/csv"
+        content_disposition = f"attachment; filename={filename}"  # CSV文件下载
+    elif filename_lower.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+        # 图片文件直接展示
+        if filename_lower.endswith('.png'):
+            media_type = "image/png"
+        elif filename_lower.endswith(('.jpg', '.jpeg')):
+            media_type = "image/jpeg"
+        elif filename_lower.endswith('.gif'):
+            media_type = "image/gif"
+        elif filename_lower.endswith('.webp'):
+            media_type = "image/webp"
+        else:
+            media_type = "application/octet-stream"
+        content_disposition = f"inline; filename={filename}"  # 图片直接展示
+    else:
+        logger.warning(f"不支持的文件类型: {filename}")
+        raise HTTPException(status_code=400, detail="只支持 CSV 和图片文件（png, jpg, jpeg, gif, webp）")
 
-    logger.info(f"提供文件下载: {filename}")
+    logger.info(f"提供文件访问: {filename} (类型: {media_type})")
 
     # 返回文件响应
     return FileResponse(
         path=file_path,
         filename=filename,
-        media_type="text/csv",
+        media_type=media_type,
         headers={
-            "Content-Disposition": f"attachment; filename={filename}",
+            "Content-Disposition": content_disposition,
             "Cache-Control": "no-cache"
         }
     )
